@@ -16,6 +16,7 @@ import (
 	"foo_librespot/bridge/internal/creds"
 	"foo_librespot/bridge/internal/logging"
 	"foo_librespot/bridge/internal/spike"
+	"foo_librespot/bridge/internal/spotifyx"
 )
 
 const usage = `Usage:
@@ -66,7 +67,7 @@ func run(args []string) int {
 			return 2
 		}
 		log := logging.New(os.Stderr, false)
-		if _, err := spike.Login(ctx, log); err != nil {
+		if _, err := spotifyx.Login(ctx, log, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "spike: login failed: %v\n", err)
 			return 1
 		}
