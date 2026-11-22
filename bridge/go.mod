@@ -2,7 +2,11 @@ module foo_librespot/bridge
 
 go 1.25.0
 
-require github.com/devgianlu/go-librespot v0.10.7
+require (
+	github.com/Microsoft/go-winio v0.6.2
+	github.com/devgianlu/go-librespot v0.10.7
+	golang.org/x/sys v0.39.0
+)
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -19,7 +23,6 @@ require (
 	golang.org/x/exp v0.0.0-20251209150349-8475f28825e9 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

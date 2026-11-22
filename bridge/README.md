@@ -1,25 +1,28 @@
-# foo_librespot bridge — Phase 0 spike
+# foo_librespot bridge
 
-Proof of concept for the future foobar2000 plugin: use
+Windows audio bridge for the future foobar2000 Spotify plugin. It uses
 [`github.com/devgianlu/go-librespot`](https://github.com/devgianlu/go-librespot)
-as a **library** on Windows to log in, fetch one Spotify track, decode it to
-float32 PCM, and write 16-bit WAV — without the Spotify Connect state machine and
-without opening an audio output device.
+as a **library**: one shared, lazily created Spotify session decodes tracks to
+interleaved 44100 Hz stereo float32 PCM and serves them over a named pipe, with
+no Spotify Connect state machine and no audio output device.
 
-The module is self-contained (`foo_librespot/bridge`) so the plugin can later
-import the same code.
-
-## Layout
+The wire contract lives in [`../proto/PROTOCOL.md`](../proto/PROTOCOL.md) and is
+implemented by `bin/librespot-bridge.exe`.
 
 ```
 bridge/
-  cmd/spike/main.go       CLI: login, dump, flag parsing
-  internal/spike/         session/player factory, device-auth login, dump loop,
-                          track-id parsing, loudness reporting
-  internal/wav/           streaming 16-bit WAV writer (+ unit tests)
-  internal/creds/         %APPDATA%\foo_librespot\credentials.json
-  internal/logging/       go-librespot Logger adapter
-  build.ps1               build spike.exe with cgo + MinGW libraries
+  cmd/bridge/            librespot-bridge.exe (pipe server, `login`)
+  cmd/bridgectl/         bridgectl.exe (status/resolve/info/open-to-wav client)
+  cmd/spike/             Phase 0 tool: `login`, `dump <track> <out.wav>`
+  internal/bridge/       protocol types, named-pipe server, streaming loop
+  internal/spotifyx/     shared session, country, metadata, resolve, sample-exact open
+  internal/seek/         frame math, page-boundary anchoring, frame discard
+  internal/spotifyuri/   URI/URL parsing
+  internal/creds/        %APPDATA%\foo_librespot\credentials.json
+  internal/logging/      go-librespot logger adapter + rotating log file
+  internal/wav/          streaming 16-bit WAV writer
+  internal/spike/        Phase 0 dump loop (now on top of internal/spotifyx)
+  build.ps1              builds all three exes with cgo + MinGW libraries
 ```
 
 ## Build
@@ -29,43 +32,152 @@ cd bridge
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-`build.ps1` prepends `C:\Program Files\Go\bin` and `C:\msys64\mingw64\bin` to
-`PATH`, sets `CGO_ENABLED=1`, `CC=gcc`, `PKG_CONFIG_PATH`, and builds
-`bin\spike.exe`. The C decode libraries (libogg, libvorbis, libFLAC, mpg123) are
-**linked statically**, so the resulting exe only imports system DLLs
-(KERNEL32, msvcrt, SHLWAPI) and needs no MinGW DLLs at runtime.
+`build.ps1` prepares `PATH` (`C:\Program Files\Go\bin`, `C:\msys64\mingw64\bin`),
+`CGO_ENABLED=1`, `CC=gcc`, `PKG_CONFIG_PATH` and the two cgo flags below, then
+builds:
 
-Manual equivalent:
+| output | package |
+| --- | --- |
+| `bin\librespot-bridge.exe` | `./cmd/bridge` |
+| `bin\spike.exe` | `./cmd/spike` |
+| `bin\bridgectl.exe` | `./cmd/bridgectl` |
 
-```powershell
-$env:PATH = "C:\Program Files\Go\bin;C:\msys64\mingw64\bin;$env:PATH"
-$env:CGO_ENABLED = "1"
-$env:CC = "gcc"
-$env:PKG_CONFIG_PATH = "C:\msys64\mingw64\lib\pkgconfig"
-$env:CGO_CFLAGS = "-DFLAC__NO_DLL"
-$env:CGO_LDFLAGS = "-lshlwapi"
-go build -trimpath -ldflags "-linkmode external -extldflags -static" -o bin/spike.exe ./cmd/spike
-```
+The C decode libraries (libogg, libvorbis, libFLAC, mpg123) are linked
+**statically**, so the exes need no MinGW DLLs at runtime:
 
-Why those two cgo flags:
+- `CGO_CFLAGS=-DFLAC__NO_DLL` — FLAC's headers otherwise declare `dllimport`,
+  and linking `libFLAC.a` then fails on `__imp_FLAC__*`.
+- `CGO_LDFLAGS=-lshlwapi` — mpg123's static archives call `PathIsRelativeW` and
+  friends.
+- `-ldflags "-linkmode external -extldflags -static"` — MSYS2's `libogg-0.dll`
+  does not export `ogg_stream_iovecin`, which `xlab/vorbis-go` references;
+  `libogg.a` does.
 
-- `-DFLAC__NO_DLL` — FLAC's headers declare `dllimport` on Windows unless this is
-  defined; linking `libFLAC.a` otherwise fails on `__imp_FLAC__*`.
-- `-lshlwapi` — mpg123's static archives call `PathIsRelativeW` and friends.
-
-Static linking is also required for libogg: MSYS2's `libogg-0.dll` does not
-export `ogg_stream_iovecin`, which `xlab/vorbis-go` references, so a default
-(dynamic) link fails; `libogg.a` has the symbol.
-
-Checks:
+Checks (tests need the same link flags because they import the decoders):
 
 ```powershell
 go vet ./...
 go test -ldflags "-linkmode external -extldflags -static" ./...
-.\bin\spike.exe --help
 ```
 
-## Usage
+## Running the bridge
+
+```text
+librespot-bridge.exe [--pipe <name>] [--parent-pid <pid>] [--debug]
+librespot-bridge.exe login
+```
+
+- `--pipe` (default `foo_librespot`) — named pipe, `\.\pipe\<name>`, byte mode,
+  many concurrent connections, one goroutine per connection. The default pipe
+  security descriptor restricts it to the current user, SYSTEM and
+  Administrators.
+- `--parent-pid` — poll the process every second and exit 0 when it is gone.
+  foobar2000 starts the bridge hidden and lets it die with itself.
+- Single instance — if the pipe already exists and answers `status`, a second
+  bridge exits 0 immediately.
+- Logs go to `%APPDATA%\foo_librespot\bridge.log` (append, rotated once to
+  `bridge.log.1` past 5 MiB).
+- `login` runs the OAuth device-authorization flow on the console and writes
+  `%APPDATA%\foo_librespot\credentials.json`; the bridge and the spike share it.
+
+### Protocol
+
+One request per connection: one JSON line in, one JSON line out. `open` keeps
+the connection and follows the header with raw little-endian float32 PCM until
+the end of the track, then closes. Ops: `status`, `resolve`, `info`, `open`.
+Errors carry `code` ∈ `not_logged_in | unavailable | bad_request | internal`.
+See `../proto/PROTOCOL.md` for the exact shapes.
+
+A request that fails with a session/connection error is retried once after the
+session is recreated; definitive answers (restricted or unplayable track,
+refused context, bad input) are returned as-is.
+
+### The shared session
+
+`internal/spotifyx.Manager` creates the session on first use and keeps it for
+all connections. It owns:
+
+- `session.NewSessionFromOptions` with the stored credentials;
+- one `player.NewPlayer` used only as a stream factory (`SetPrimaryStream` is
+  never called, so no audio device is opened);
+- the account **country**, taken from the accesspoint's
+  `PacketTypeCountryCode` packet exactly like go-librespot's daemon
+  (`sess.Accesspoint().Receive(...)`), kept in an atomic and exposed to the
+  player's `CountryCode` callback. A real country re-enables go-librespot's
+  media-restriction check and its alternative-track relinking, which is what
+  makes tracks such as `spotify:track:4uLU6hMCjMI75M1A2tKUQC` play: Spotify
+  relinks it to an alternative, and `track_info.uri` still reports the URI that
+  was **requested**, while title/artists/audio come from what actually played.
+
+`player.NewStream` is serialised (its CDN quarantine map is not concurrency
+safe); decoding and streaming afterwards are fully concurrent per connection.
+
+### Metadata
+
+`resolve` and `info` use the extended-metadata API in batches of 100 entities
+(up to 4 in flight, so 500 URIs is five requests) and ask for both
+`TRACK_V4` and `AUDIO_FILES` per entity. From that:
+
+- title, artists, album, album artist, track/disc number, year, duration;
+- `cover_url` = `https://i.scdn.co/image/<hex>` for the largest album image
+  (`album.cover_group.image`, falling back to `album.cover`);
+- codec/bitrate of the format `open` would select for the preferred bitrate;
+- ReplayGain 2.0 values from Spotify's loudness metadata
+  (`track_gain_db = -18 - loudness_db`, `track_peak = 10^(true_peak_db/20)`,
+  same for the album values when present). Not applied to the audio.
+
+`resolve` expands album, playlist and `spotify:user:<u>:collection` (Liked
+Songs, newest first, using the session's own account) contexts through
+`spclient.NewContextResolver`, paging until the end. `info` preserves the
+request order; an unknown track yields an unplayable entry with empty fields.
+
+### Sample-accurate seeking
+
+foobar2000 seeks by closing the connection and sending `open` with a new
+`start_ms`; the header's `start_frame` is `round(start_ms * 44100 / 1000)` and
+the first PCM frame sent is exactly that frame.
+
+librespot seeks in milliseconds and lands on a codec boundary; for Vorbis the
+decoder starts up to ~140 ms before (or slightly after) the request. The bridge:
+
+1. opens the decoder `600 ms` before the target (`0` when the target is under
+   one second), so the landing point is almost always before it;
+2. pins the decoder's *exact* position: `Source.PositionMs()` only truncates to
+   milliseconds, but the Vorbis decoder keeps the Ogg granule position (the end
+   of the last decoded page) in `lastGranulepos`. `internal/spotifyx` reads it
+   reflectively; the first granule after a seek can be stale, so the bridge
+   reads one frame at a time until the granule changes twice and anchors at the
+   page boundary (exact to the sample);
+3. discards decoded frames until the anchored position reaches `start_frame`;
+4. reopens further back if a seek lands after the target, and falls back to
+   decoding from frame 0 (exact, just slower) if a decoder exposes no granule
+   or the discards hit the end of the track.
+
+For decoders whose seek is already sample-accurate (mp3, flac) the anchor is
+`floor(seek_ms * 44100 / 1000)`, matching librespot's own `SetPositionMs`
+arithmetic. A `start_ms` at or past the track duration returns a valid header
+and no audio.
+
+`internal/seek` holds the frame math and the anchoring loop, with unit tests for
+the rounding and the stale-granule handling.
+
+## bridgectl
+
+```text
+bridgectl [--pipe <name>] status
+bridgectl [--pipe <name>] resolve <uri-or-url>
+bridgectl [--pipe <name>] info <uri-or-url>...
+bridgectl [--pipe <name>] open-to-wav <uri> <out.wav>
+          [--start-ms N] [--seconds S] [--bitrate 96|160|320]
+```
+
+`open-to-wav` prints the header (including `start_frame`) and the track info,
+then writes the PCM as 16-bit WAV and reports frames, wall time and peak/RMS.
+
+## Phase 0 spike
+
+`bin\spike.exe` keeps the original proof-of-concept commands and now shares the
+session/metadata/seek code with the bridge:
 
 ```text
 spike.exe login
@@ -73,121 +185,40 @@ spike.exe dump <spotify:track:ID | open.spotify.com/track/ID | ID> <out.wav>
               [--start-ms N] [--seconds S] [--bitrate 96|160|320] [-v]
 ```
 
-### login
+## Live verification
 
-Runs go-librespot's OAuth 2.0 **device authorization** flow. It prints the
-verification URL and user code, waits for approval, then stores:
+Against the logged-in Premium account (`%APPDATA%\foo_librespot\credentials.json`):
 
-```json
-{
-  "version": 1,
-  "device_id": "<40 hex chars>",
-  "device_type": 1,
-  "username": "<spotify user>",
-  "data": "<base64 stored-credentials blob>",
-  "saved_at": "..."
-}
-```
+- `status` → `{"ok":true,"logged_in":true,"username":"testuser0001","country":"SE","version":"0.1.0"}`.
+- `resolve https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj` → 14 tracks with
+  covers and gains; Liked Songs → 377 tracks; `info` with all 377 URIs in one
+  request (4 batches) returned 377 entries in order, all with `cover_url` and
+  gains.
+- `open spotify:track:0VjIjW4GlUZAMYd2vXMi3b` at 60000 ms: header
+  `start_frame 2646000`, 5 s of non-silent PCM (peak 0.9855, RMS 0.3333).
+  Comparing those samples with a decode from frame 0: **0 of 882000 bytes
+  differ at frame 2646000**, and every ±1-frame alignment differs (a 1-frame
+  shift changes 440868 bytes). The same check at 180000 ms (frame 7938000) is
+  also byte-identical.
+- `open spotify:track:4uLU6hMCjMI75M1A2tKUQC` (the track that used to fail with
+  `failed retrieving aes key with code 1`) plays: `uri` is the requested
+  `4uLU…`, title/artists are the relinked alternative Spotify served, and the
+  audio is non-silent.
+- A second instance on the same pipe exits 0; `--parent-pid` exits 0 when the
+  parent dies; a bridge with no credentials file answers
+  `{"ok":false,"code":"not_logged_in"}`; clients closing mid-stream stop the
+  bridge's decoder promptly; 5 concurrent `info` requests succeed while a
+  stream is being written.
 
-at `%APPDATA%\foo_librespot\credentials.json`. Later commands reuse the same
-device id and stored credentials.
+## Notes and limits
 
-### dump
-
-```powershell
-# whole track at the preferred 160 kbps
-.\bin\spike.exe dump spotify:track:4uLU6hMCjMI75M1A2tKUQC out.wav
-
-# 15 s starting at 1:00, ask for 320 kbps, from a web URL
-.\bin\spike.exe dump https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC out.wav `
-    --start-ms 60000 --seconds 15 --bitrate 320
-```
-
-The WAV is always 44100 Hz, stereo, 16-bit PCM. The command prints track name,
-artists, duration, selected file format/codec/bitrate, decoder sample rate and
-bit depth, Spotify loudness/true-peak metadata, decoded level (peak/RMS), and
-seek positions reported by the decoder.
-
-## How it works
-
-### Session and login
-
-Built directly on `session.NewSessionFromOptions`:
-
-- `login` → `session.DeviceAuthCredentials` with an `OnCode` callback that prints
-  the URL/code.
-- `dump` → `session.StoredCredentials{Username, Data}`.
-
-Device type is `DeviceType_COMPUTER`; the 20-byte device id is generated once at
-login and persisted. The session object supplies:
-
-- `Spclient()` — metadata, storage resolution, audio files extension;
-- `AudioKey()` — audio-key provider;
-- `Events()` — go-librespot's default event manager (`events.Plugin`), which is a
-  no-op unless an events plugin is installed.
-
-No dealer/Connect state, zeroconf, or state reporting is driven by this tool.
-
-### Player and stream
-
-`player.NewPlayer` is called with only `Spclient`, `AudioKey`, `Events`, `Log`,
-`CountryCode`, and `NormalisationEnabled: false`. `NewPlayer` merely stores an
-output-factory closure; the audio backend is opened only by
-`SetPrimaryStream`, which is **never called**. Consequently no WASAPI/ALSA/Pulse
-device is opened.
-
-`player.NewStream(ctx, httpClient, spotifyId, bitrate, mediaPosition)` then:
-
-1. resolves track metadata (`getUnrestrictedTrack`) and the audio-files
-   extension;
-2. selects the available format nearest the requested bitrate
-   (`selectBestMediaFormat`; FLAC only when enabled, which this spike doesn't);
-3. requests the audio key, resolves storage, downloads the encrypted file;
-4. decrypts it and builds a Vorbis/MP3/FLAC decoder that implements
-   `librespot.AudioSource`;
-5. seeks to `mediaPosition` using `player.StartPosition` (clamps to 0 at/after
-   track end) and `Source.SetPositionMs`.
-
-`Stream.Source` is the decoder: `Read([]float32) (int, error)` returns
-**interleaved float32 samples** (already 44100 Hz stereo for all supported
-formats; the library rejects anything else). The dump loop reads 16384 floats at
-a time, tracks peak/RMS, and the WAV writer converts to signed 16-bit with
-clipping.
-
-### Seeking
-
-`--start-ms` is passed as `NewStream`'s `mediaPosition`, so the seek is performed
-inside the same call that opens the stream (`SetPositionMs` on the decoder, which
-uses each codec's seek table/byte offset). The tool prints the position reported
-by `Source.PositionMs()` immediately after opening and after decoding, and warns
-if the open position is more than 3 s from the requested one. Requesting a
-position at or beyond the duration starts at 0 by design.
-
-### Normalisation metadata
-
-Loudness is fetched separately from the audio-files extension
-(`DefaultFileNormalizationParams`: loudness LUFS, true peak dBTP). The spike
-decodes **without** applying normalisation (`NormalisationEnabled: false`) so the
-plugin can decide; it prints the gain/factor go-librespot would apply.
-
-## Open questions / unverified assumptions
-
-- **Not exercised against live Spotify here.** Logging in and downloading need the
-  user's interactive approval; build, vet, tests, and `--help` were verified.
-- Stored-credential expiry/refresh over long periods is not tested. The blob is
-  persisted once; if Spotify invalidates it, re-run `login`.
-- The empty `CountryCode` passed to the player disables go-librespot's
-  restricted-track check (the library skips the check for non-2-letter codes).
-  A real plugin should pass the user's country; with a country set, the
-  library's alternative-track relinking applies.
-- `Read` EOF behaviour differs slightly between decoders (some return the final
-  samples together with `io.EOF`); the loop writes `n` samples before treating
-  EOF as completion, so both shapes work. This was read from the library source,
-  not observed on a real stream.
-- Decoder `Close` methods have inconsistent signatures (`Close()` vs
-  `Close() error`); the tool calls whichever is present and ignores the error.
-- Fetching loudness duplicates one metadata request that `NewStream` already
-  makes internally; a future integration should expose it from the stream path
-  instead.
-- `go.mod` declares Go 1.25 (go-librespot v0.10.7's minimum); built with Go
-  1.27.4 on this machine.
+- The exact Vorbis anchor reads `lastGranulepos` through reflection because the
+  library exposes only millisecond positions. If a future go-librespot renames
+  that field, the bridge detects it (`Granule` reports `ok == false`) and falls
+  back to decoding from frame 0, which is exact but slower for large seeks.
+- Vorbis and MP3 are the formats Spotify serves to this client; FLAC (PlayPlay)
+  is not enabled, but its seek path is handled.
+- Liked Songs always resolves the *session account's* collection, whatever user
+  the URI names (the protocol has no notion of another user's library).
+- Gains are metadata only; the PCM is never gain-adjusted, so foobar2000's own
+  ReplayGain handling can apply them.
