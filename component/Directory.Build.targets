@@ -1,0 +1,19 @@
+<Project>
+  <!--
+    Link the C++ runtime statically (/MT, /MTd) for this component and the SDK
+    projects under third_party. foobar2000 ships its own copy of msvcp140.dll
+    (14.44 in 2.26.x); a DLL built with a newer toolset that imports the
+    dynamic runtime can fail to load against that older copy, which makes
+    foobar2000 start in safe mode.
+  -->
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
