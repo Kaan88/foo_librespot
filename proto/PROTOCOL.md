@@ -39,4 +39,4 @@ then the SAME connection carries raw interleaved float32 little-endian PCM until
  "track_gain_db":-5.64,"track_peak":1.104,"album_gain_db":null,"album_peak":null,
  "playable":true}
 ```
-Gains are ReplayGain-style: `gain_db = -18 - loudness_lufs`?? NO: use Spotify's reference: `gain_db = -14 - loudness_db`, peak = 10^(true_peak_db/20). Not applied to audio.
+Gains are ReplayGain 2.0 values computed from Spotify loudness metadata: `track_gain_db = -18 - loudness_db`, `track_peak = 10^(true_peak_db/20)` (linear). Album values null if unknown. Not applied to the audio; foobar2000 applies them via its ReplayGain setting.
