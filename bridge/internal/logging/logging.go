@@ -6,16 +6,22 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 )
 
 // Logger writes leveled lines to a single sink. Fields added through WithField
-// and WithError are prefixed to every line.
+// and WithError are prefixed to every line, after the logger's own prefix.
+//
+// Every line starts with a millisecond timestamp, and the bridge prefixes its
+// lines with its process id: several bridges (and several generations of one)
+// append to the same log file, so a line without both is impossible to place.
 type Logger struct {
 	mu     sync.Mutex
 	out    io.Writer
 	debug  bool
+	prefix string
 	fields []string
 }
 
@@ -32,13 +38,16 @@ func (l *Logger) logf(level, format string, args ...interface{}) {
 
 	msg := fmt.Sprintf(format, args...)
 	prefix := ""
+	if l.prefix != "" {
+		prefix = "[" + l.prefix + "] "
+	}
 	if len(l.fields) > 0 {
-		prefix = "[" + strings.Join(l.fields, " ") + "] "
+		prefix += "[" + strings.Join(l.fields, " ") + "] "
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Fprintf(l.out, "%s: %s%s\n", level, prefix, msg)
+	fmt.Fprintf(l.out, "%s %s: %s%s\n", time.Now().Format("2006-01-02 15:04:05.000"), level, prefix, msg)
 }
 
 func (l *Logger) Tracef(format string, args ...interface{}) { l.logf("TRACE", format, args...) }
@@ -64,9 +73,15 @@ func (l *Logger) WithError(err error) librespot.Logger {
 	return l.with("err=" + err.Error())
 }
 
+// WithPrefix returns a logger that puts "prefix" in front of every line, so
+// lines from different processes writing to one file stay distinguishable.
+func (l *Logger) WithPrefix(prefix string) *Logger {
+	return &Logger{out: l.out, debug: l.debug, prefix: prefix, fields: l.fields}
+}
+
 func (l *Logger) with(field string) *Logger {
 	fields := make([]string, len(l.fields), len(l.fields)+1)
 	copy(fields, l.fields)
 	fields = append(fields, field)
-	return &Logger{out: l.out, debug: l.debug, fields: fields}
+	return &Logger{out: l.out, debug: l.debug, prefix: l.prefix, fields: fields}
 }

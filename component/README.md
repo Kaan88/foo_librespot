@@ -26,7 +26,7 @@ The official foobar2000 SDK is downloaded on demand by
 ```powershell
 cd component
 .\scripts\build.ps1                     # Release x64
-.\scripts\build.ps1 -Platform Win32     # optional 32-bit build
+.\scripts\build.ps1 -Platform Win32     # the 32-bit build foobar2000 x86 loads
 .\scripts\build.ps1 -WithTools          # + tools/fake_bridge, tools/bridge_probe
 ```
 
@@ -37,7 +37,8 @@ toolset (v145 for MSVC 14.5x) and passes it to MSBuild as
 Products:
 
 - `build/<Config>/x64/foo_librespot.dll`
-- `build/tools/<Config>/x64/fake_bridge.exe`, `bridge_probe.exe`
+- `build/<Config>/Win32/foo_librespot.dll`
+- `build/tools/<Config>/<Platform>/fake_bridge.exe`, `bridge_probe.exe`
 
 ## Package
 
@@ -46,17 +47,20 @@ Products:
 .\scripts\package.ps1 -BridgeExe ..\bridge\bin\librespot-bridge.exe
 ```
 
-Produces `dist/foo_librespot.fb2k-component` (a zip) with the foobar2000 v2
-x64 layout:
+Builds both platforms and produces `dist/foo_librespot.fb2k-component` (a zip)
+in the foobar2000 v2 multi-architecture layout:
 
 ```
-x64/foo_librespot.dll
-x64/librespot-bridge.exe
+foo_librespot.dll          x86 DLL, at the component root
+librespot-bridge.exe       its helper
+x64/foo_librespot.dll      x64 DLL
+x64/librespot-bridge.exe   its helper
 ```
 
-If the bridge executable is missing, the DLL is still packaged and a warning is
-printed. The bridge is looked up next to the DLL at runtime
-(`core_api::get_my_full_path()`), so the two files must stay together.
+If the bridge executable is missing, the DLLs are still packaged and a warning
+is printed. The bridge is looked up next to the DLL at runtime
+(`core_api::get_my_full_path()`), then in the parent folder, so a DLL copied out
+of its architecture folder still finds a bridge at the package root.
 
 ## Test
 
@@ -109,8 +113,15 @@ import path.
 ## Error behaviour
 
 - Bridge not running: it is started hidden with
-  `--parent-pid <foobar2000 pid> --pipe foo_librespot` on first use and waited
-  for up to 12 s (thread-safe, restarted if it died).
+  `--parent-pid <foobar2000 pid> --pipe foo_librespot` on first use. Readiness
+  is the pipe accepting connections (`WaitNamedPipe`), never a status round
+  trip, and the start timeout is 15 s. A bridge this process already started is
+  never duplicated: if its handle is still alive, the component waits for its
+  pipe instead of spawning another.
+- Spotify still connecting: `info`/`resolve` wait up to 60 s, an `open` header
+  up to 30 s, all abortable by foobar2000's abort callback. A failed session
+  comes back as `unavailable` with `connecting to Spotify failed: <reason>`,
+  which the component shows as `Spotify: connecting failed — <reason>`.
 - Bridge replies `not_logged_in`: the input throws
   `Spotify: not logged in — Preferences > Tools > foo_librespot` and details go
   to the foobar2000 console.
@@ -138,12 +149,12 @@ scripts/                   fetch_sdk / build / test / package
 - The component and tools use only the SDK, pfc and the component client (plain
   Win32 dialogs); ATL/WTL from `foo_sample` is not required, which keeps the
   build self-contained (the SDK does not ship WTL).
-- The bridge executable is written in a separate branch and is not part of this
-  tree; `-BridgeExe` supplies it at packaging time.
+- The bridge executable is built from `../bridge` (`bridge\build.ps1`) and
+  supplied to packaging with `-BridgeExe` (the default points at it).
 - Clipboard paste / drag-and-drop of Spotify URLs is not wired to the add-link
   resolver (nice-to-have, not implemented).
 - `retag` is not supported (virtual tracks).
 - In-app behaviour (foobar2000 host) was not exercised in this environment by
-  design; the DLL builds as an x64 foobar2000 component
+  design; the DLL builds for x86 and x64 foobar2000
   (`foobar2000_get_interface` exported) and the protocol layer is covered by the
   tests above.

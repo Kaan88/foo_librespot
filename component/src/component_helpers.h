@@ -29,6 +29,10 @@ void ensure_bridge_started(abort_callback& aborter);
 // details to the console first. Never returns.
 [[noreturn]] void throw_io_error(const std::exception& error);
 
+// The user-facing form of a bridge/pipe error ("Spotify: connecting failed —
+// <reason>" and so on), for popups that show an error next to their context.
+std::string user_error_message(const std::exception& error);
+
 // Parses "spotify:track:<id>" paths.
 bool is_spotify_track_path(const char* path);
 bool is_spotify_track_uri(const std::string& uri);

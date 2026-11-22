@@ -150,15 +150,19 @@ func (s *Server) handle(conn net.Conn) {
 }
 
 func (s *Server) status(ctx context.Context, conn net.Conn) {
-	resp := statusResponse{OK: true, LoggedIn: true, Version: Version}
-
-	if err := s.mgr.Do(ctx, func(env *spotifyx.Env) error { return nil }); err != nil {
-		s.writeError(conn, err)
-		return
-	}
-	resp.Username = s.mgr.Username()
-	resp.Country = s.mgr.WaitCountry(10 * time.Second)
-	s.writeJSON(conn, resp)
+	// Status answers from the manager's snapshot: it must return immediately,
+	// even while the session is still being created (and even if that creation
+	// is stuck on a slow network).
+	st := s.mgr.Status()
+	s.writeJSON(conn, statusResponse{
+		OK:        true,
+		LoggedIn:  st.LoggedIn,
+		Username:  st.Username,
+		Country:   st.Country,
+		State:     st.State,
+		LastError: st.LastError,
+		Version:   Version,
+	})
 }
 
 func (s *Server) resolve(ctx context.Context, conn net.Conn, req *request) {

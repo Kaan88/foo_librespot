@@ -2,9 +2,9 @@
 
 Windows audio bridge for the future foobar2000 Spotify plugin. It uses
 [`github.com/devgianlu/go-librespot`](https://github.com/devgianlu/go-librespot)
-as a **library**: one shared, lazily created Spotify session decodes tracks to
-interleaved 44100 Hz stereo float32 PCM and serves them over a named pipe, with
-no Spotify Connect state machine and no audio output device.
+as a **library**: one shared Spotify session, created eagerly in the background,
+decodes tracks to interleaved 44100 Hz stereo float32 PCM and serves them over a
+named pipe, with no Spotify Connect state machine and no audio output device.
 
 The wire contract lives in [`../proto/PROTOCOL.md`](../proto/PROTOCOL.md) and is
 implemented by `bin/librespot-bridge.exe`.
@@ -71,12 +71,15 @@ librespot-bridge.exe login
   many concurrent connections, one goroutine per connection. The default pipe
   security descriptor restricts it to the current user, SYSTEM and
   Administrators.
-- `--parent-pid` — poll the process every second and exit 0 when it is gone.
-  foobar2000 starts the bridge hidden and lets it die with itself.
-- Single instance — if the pipe already exists and answers `status`, a second
-  bridge exits 0 immediately.
+- `--parent-pid` — wait on the process handle and shut down (exit 0) when it is
+  signaled. The result is verified with `GetExitCodeProcess` and the exit code
+  is logged; a parent that cannot be opened (access denied, still starting) is
+  retried, never assumed dead.
+- Single instance — if the pipe is connectable (`winio.DialPipe`), a second
+  bridge exits 0 immediately. No status round trip is involved.
 - Logs go to `%APPDATA%\foo_librespot\bridge.log` (append, rotated once to
-  `bridge.log.1` past 5 MiB).
+  `bridge.log.1` past 5 MiB). Every line starts with a timestamp and
+  `[pid=<pid>]`, because several bridges append to the same file.
 - `login` runs the OAuth device-authorization flow on the console and writes
   `%APPDATA%\foo_librespot\credentials.json`; the bridge and the spike share it.
 
@@ -88,15 +91,26 @@ the end of the track, then closes. Ops: `status`, `resolve`, `info`, `open`.
 Errors carry `code` ∈ `not_logged_in | unavailable | bad_request | internal`.
 See `../proto/PROTOCOL.md` for the exact shapes.
 
-A request that fails with a session/connection error is retried once after the
-session is recreated; definitive answers (restricted or unplayable track,
-refused context, bad input) are returned as-is.
+`status` answers immediately from cached state (it never waits for the
+session), so a client can always ask what is going on. A request that needs the
+session waits for the in-flight creation — bounded by its own timeout — and
+fails with `unavailable` and `connecting to Spotify failed: <reason>` when that
+creation fails. A request that fails with a session/connection error is retried
+once after the session is recreated; definitive answers (restricted or
+unplayable track, refused context, bad input) are returned as-is.
 
 ### The shared session
 
-`internal/spotifyx.Manager` creates the session on first use and keeps it for
-all connections. It owns:
+`internal/spotifyx.Manager` starts creating the session as soon as the bridge
+starts (when credentials exist) and owns it for all connections:
 
+- creation runs on the manager's own context, never a request's: a client that
+  gives up cannot cancel or poison it; concurrent requests share one in-flight
+  creation (single-flight) and a failed round is retried with backoff;
+- each accesspoint attempt has a 10 s deadline and the next accesspoint is
+  tried right away, so one dead port (for example a blocked 4070) costs 10 s
+  instead of the library's 30 s handshake timeout. Firewall-friendly ports
+  (443, 80) are preferred over 4070;
 - `session.NewSessionFromOptions` with the stored credentials;
 - one `player.NewPlayer` used only as a stream factory (`SetPrimaryStream` is
   never called, so no audio device is opened);
@@ -127,9 +141,12 @@ safe); decoding and streaming afterwards are fully concurrent per connection.
   same for the album values when present). Not applied to the audio.
 
 `resolve` expands album, playlist and `spotify:user:<u>:collection` (Liked
-Songs, newest first, using the session's own account) contexts through
-`spclient.NewContextResolver`, paging until the end. `info` preserves the
-request order; an unknown track yields an unplayable entry with empty fields.
+Songs, newest first, using the session's own account) contexts. Playlists are
+read through the playlist service (like go-librespot's own playback), which
+lists every item — including Spotify's generated playlists such as Daily Mixes
+— instead of relying on context resolve; the pages after the first are fetched
+as playback gets there. `info` preserves the request order; an unknown track
+yields an unplayable entry with empty fields.
 
 ### Sample-accurate seeking
 

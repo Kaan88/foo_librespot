@@ -178,6 +178,15 @@ public:
 		std::vector<flp::track_info> resolved;
 		std::string failures;
 
+		// The popup lists one line per link, so the "Spotify: " label the
+		// helpers add would repeat on every line.
+		const auto describe = [](const std::exception& error) {
+			std::string message = flp::user_error_message(error);
+			const std::string label = "Spotify: ";
+			if (message.compare(0, label.size(), label) == 0) message.erase(0, label.size());
+			return message;
+		};
+
 		for (const std::string& input : inputs) {
 			try {
 				flp::bridge_client client;
@@ -192,10 +201,10 @@ public:
 						popup_message::icon_error);
 					return;
 				}
-				failures += input + ": " + error.what() + "\n";
+				failures += input + ": " + describe(error) + "\n";
 				console::print("foo_librespot: resolve failed for ", input.c_str(), ": ", error.what());
 			} catch (const std::exception& error) {
-				failures += input + ": " + error.what() + "\n";
+				failures += input + ": " + describe(error) + "\n";
 				console::print("foo_librespot: resolve failed for ", input.c_str(), ": ", error.what());
 			}
 		}

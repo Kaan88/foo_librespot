@@ -17,6 +17,8 @@ struct bridge_status {
 	bool logged_in = false;
 	std::string username;
 	std::string country;
+	std::string state;      // "connecting", "connected" or "error"
+	std::string last_error; // reason of the last failed session creation
 	std::string version;
 };
 
@@ -71,7 +73,7 @@ public:
 		unsigned reply_timeout_ms = 10000);
 
 	std::vector<track_info> info(const std::vector<std::string>& uris, const cancel_token& ct,
-		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
 
 	std::vector<track_info> resolve(const std::string& uri, const cancel_token& ct,
 		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);

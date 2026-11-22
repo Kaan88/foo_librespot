@@ -64,6 +64,10 @@ public:
 
 	bool decode_run(audio_chunk& p_chunk, abort_callback& aborter) {
 		if (m_eof || !m_stream) return false;
+		// Reads that find buffered audio return immediately, so the abort
+		// callback has to be checked here too: a skip must not wait for the
+		// pipe to drain.
+		aborter.check();
 
 		const size_t frameBytes = static_cast<size_t>(m_channels) * sizeof(float);
 		const size_t targetBytes = kFramesPerChunk * frameBytes;

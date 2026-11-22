@@ -137,8 +137,16 @@ private:
 		}
 		std::string text = "Bridge running, logged in as " + status.username;
 		if (!status.country.empty()) text += " (" + status.country + ")";
-		if (!status.version.empty()) text += ", bridge v" + status.version;
-		set_status_text(text + ".");
+		if (status.state == "error") {
+			text += ". Spotify is unavailable";
+			text += status.last_error.empty() ? "." : ": " + status.last_error + ".";
+		} else if (status.state == "connected") {
+			text += ". Spotify connected";
+		} else {
+			text += ". Connecting to Spotify...";
+		}
+		if (!status.version.empty()) text += " Bridge v" + status.version + ".";
+		set_status_text(text);
 	}
 
 	void set_bitrate_selection(int kbps) {
