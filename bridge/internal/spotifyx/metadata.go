@@ -165,7 +165,7 @@ func (m *Manager) Resolve(ctx context.Context, ref spotifyuri.Ref) ([]TrackInfo,
 		if ref.Kind == spotifyuri.KindLiked {
 			uris, err = likedURIs(ctx, env)
 		} else {
-			uris, err = contextURIs(ctx, env, m.log, ref.URI)
+			uris, err = contextURIs(ctx, env, m.log, ref)
 		}
 		return err
 	})
@@ -210,8 +210,25 @@ func (m *Manager) Info(ctx context.Context, uris []string) ([]TrackInfo, error) 
 }
 
 // contextURIs walks every page of a context (album, playlist, bare track).
-func contextURIs(ctx context.Context, env *Env, log librespot.Logger, uri string) ([]string, error) {
-	resolver, err := spclient.NewContextResolver(ctx, log, env.Session.Spclient(), &connectpb.Context{Uri: uri})
+//
+// Playlists are read through the playlist service rather than context resolve:
+// Spotify's generated playlists (Daily Mixes and the like) and playlists that
+// mix episodes with tracks are not reliably described by context resolve,
+// while the playlist service lists every item with its uid.
+func contextURIs(ctx context.Context, env *Env, log librespot.Logger, ref spotifyuri.Ref) ([]string, error) {
+	spotCtx := &connectpb.Context{Uri: ref.URI}
+	if ref.Kind == spotifyuri.KindPlaylist {
+		if id, err := librespot.SpotifyIdFromUri(ref.URI); err == nil {
+			if playlistCtx, err := env.Session.Spclient().PlaylistContext(ctx, *id); err == nil {
+				spotCtx = playlistCtx
+			} else {
+				log.WithField("uri", ref.URI).
+					Warnf("reading the playlist directly failed (%v); falling back to context resolve", err)
+			}
+		}
+	}
+
+	resolver, err := spclient.NewContextResolver(ctx, log, env.Session.Spclient(), spotCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +240,7 @@ func contextURIs(ctx context.Context, env *Env, log librespot.Logger, uri string
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("resolving %s: %w", uri, err)
+			return nil, fmt.Errorf("resolving %s: %w", ref.URI, err)
 		}
 		for _, track := range tracks {
 			if u := track.GetUri(); strings.HasPrefix(u, "spotify:track:") {
@@ -231,11 +248,11 @@ func contextURIs(ctx context.Context, env *Env, log librespot.Logger, uri string
 			}
 		}
 		if len(uris) > maxResolveTracks {
-			return nil, fmt.Errorf("%s has more than %d tracks", uri, maxResolveTracks)
+			return nil, fmt.Errorf("%s has more than %d tracks", ref.URI, maxResolveTracks)
 		}
 	}
 	if len(uris) == 0 {
-		return nil, fmt.Errorf("%s contains no tracks", uri)
+		return nil, fmt.Errorf("%s contains no tracks", ref.URI)
 	}
 	return uris, nil
 }

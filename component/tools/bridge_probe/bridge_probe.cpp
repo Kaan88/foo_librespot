@@ -97,6 +97,7 @@ int run_play(flp::bridge_client& client, const std::string& uri, int startMs, lo
 
 	try {
 		for (;;) {
+			if (cancel.aborted()) throw flp::cancelled();
 			if (frameLimit > 0 && frames >= frameLimit) break;
 
 			size_t got = 0;

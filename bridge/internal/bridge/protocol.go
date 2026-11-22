@@ -29,11 +29,13 @@ type request struct {
 }
 
 type statusResponse struct {
-	OK       bool   `json:"ok"`
-	LoggedIn bool   `json:"logged_in"`
-	Username string `json:"username"`
-	Country  string `json:"country"`
-	Version  string `json:"version"`
+	OK        bool   `json:"ok"`
+	LoggedIn  bool   `json:"logged_in"`
+	Username  string `json:"username"`
+	Country   string `json:"country"`
+	State     string `json:"state"`
+	LastError string `json:"last_error"`
+	Version   string `json:"version"`
 }
 
 type tracksResponse struct {
@@ -73,6 +75,8 @@ func codeFor(err error) string {
 		return ae.code
 	case errors.Is(err, spotifyx.ErrNotLoggedIn):
 		return CodeNotLoggedIn
+	case spotifyx.IsConnectError(err):
+		return CodeUnavailable
 	case spotifyx.IsPermanent(err):
 		return CodeUnavailable
 	default:

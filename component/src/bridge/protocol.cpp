@@ -107,6 +107,8 @@ bridge_status bridge_client::status(const cancel_token& ct, unsigned connect_tim
 	out.logged_in = reply.get_bool("logged_in", false);
 	out.username = reply.get_string("username");
 	out.country = reply.get_string("country");
+	out.state = reply.get_string("state");
+	out.last_error = reply.get_string("last_error");
 	out.version = reply.get_string("version");
 	return out;
 }

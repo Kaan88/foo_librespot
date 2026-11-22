@@ -1,5 +1,6 @@
 #include "process.h"
 
+#include <algorithm>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -99,9 +100,43 @@ bool bridge_process::process_alive_locked() {
 	if (m_process == 0) return false;
 	HANDLE h = reinterpret_cast<HANDLE>(m_process);
 	if (WaitForSingleObject(h, 0) == WAIT_TIMEOUT) return true;
+
+	DWORD code = 0;
+	if (!GetExitCodeProcess(h, &code)) code = 0;
+	m_exit_code = static_cast<unsigned long>(code);
 	CloseHandle(h);
 	m_process = 0;
 	return false;
+}
+
+bool bridge_process::pipe_reachable_locked(unsigned timeout_ms) {
+	const std::wstring path = L"\\\\.\\pipe\\" + m_pipe_name;
+	const ULONGLONG start = GetTickCount64();
+
+	for (;;) {
+		DWORD slice = 0;
+		if (timeout_ms != 0) {
+			const ULONGLONG elapsed = GetTickCount64() - start;
+			if (elapsed >= timeout_ms) return false;
+			// WaitNamedPipe returns at once when no instance exists at all, so
+			// this stays responsive while a bridge is still starting.
+			slice = static_cast<DWORD>(std::min<ULONGLONG>(timeout_ms - elapsed, 50));
+		}
+		if (WaitNamedPipeW(path.c_str(), slice)) return true;
+		if (timeout_ms == 0) return false;
+
+		// WaitNamedPipe returns immediately when the pipe does not exist at
+		// all, so sleep a little instead of spinning while it starts.
+		const DWORD err = GetLastError();
+		if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PIPE_NOT_CONNECTED) {
+			Sleep(20);
+		}
+	}
+}
+
+bool bridge_process::pipe_reachable(unsigned timeout_ms) {
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return pipe_reachable_locked(timeout_ms);
 }
 
 bool bridge_process::spawn_locked(std::string& error, bool new_console) {
@@ -132,6 +167,8 @@ bool bridge_process::spawn_locked(std::string& error, bool new_console) {
 	si.wShowWindow = new_console ? SW_SHOWNORMAL : SW_HIDE;
 	PROCESS_INFORMATION pi = {};
 
+	// No inherited handles: the bridge only needs its pipe name and the pid,
+	// and it finds the pipe itself.
 	const DWORD flags = new_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
 	if (!CreateProcessW(m_exe.c_str(), cmdBuffer.data(), nullptr, nullptr, FALSE, flags, nullptr,
 			workDir.empty() ? nullptr : workDir.c_str(), &si, &pi)) {
@@ -181,33 +218,35 @@ void bridge_process::ensure_running(const cancel_token& ct, unsigned start_timeo
 	std::lock_guard<std::mutex> lock(m_mutex);
 	ct.check();
 
-	bridge_status status;
-	std::string error;
-	if (try_status(status, error, 400)) return;
+	// Pipe connectability is the whole readiness test. A status request used to
+	// be the test, but status queues behind session creation while the network
+	// is slow, which made a perfectly healthy bridge look dead.
+	if (pipe_reachable_locked(0)) return;
 
-	ct.check();
-	if (m_exe.empty()) {
-		throw pipe_error("librespot bridge path is not configured (internal error)");
-	}
+	std::string error;
 	if (!process_alive_locked()) {
+		ct.check();
 		if (!spawn_locked(error, false)) {
 			throw pipe_error("could not start librespot-bridge.exe: " + error);
 		}
 	}
+	// If a bridge of ours is still alive, never start another one: wait for it
+	// to open the pipe instead.
 
-	const ULONGLONG start = GetTickCount64();
-	const ULONGLONG deadline = start + (start_timeout_ms == 0 ? 10000 : start_timeout_ms);
+	const unsigned timeout = start_timeout_ms == 0 ? 15000 : start_timeout_ms;
+	const ULONGLONG deadline = GetTickCount64() + timeout;
 	for (;;) {
 		ct.check();
-		if (try_status(status, error, 500)) return;
+		if (pipe_reachable_locked(100)) return;
 
 		if (!process_alive_locked()) {
-			throw pipe_error("librespot-bridge.exe exited during startup: " + error);
+			throw pipe_error("librespot-bridge.exe exited during startup (exit code " +
+				std::to_string(m_exit_code) +
+				"); see %APPDATA%\\foo_librespot\\bridge.log");
 		}
 		if (GetTickCount64() >= deadline) {
 			throw pipe_error("timed out waiting for librespot-bridge.exe to open its pipe");
 		}
-		Sleep(100);
 	}
 }
 

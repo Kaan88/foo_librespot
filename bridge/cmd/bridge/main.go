@@ -3,15 +3,14 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -86,12 +85,18 @@ func run(args []string) int {
 	}
 	defer closeLog()
 
+	// Several bridges append to the same log file, so every line names the
+	// process that wrote it.
+	self := "pid=" + strconv.Itoa(os.Getpid())
+	log = log.WithPrefix(self)
+
 	path := bridge.PipePath(*pipeName)
 
-	// A second instance started by another component must not fight over the
-	// pipe: if the existing bridge answers, this one is done.
-	if otherAnswers(path, 1500*time.Millisecond) {
-		log.Infof("another bridge already answers on %s; exiting", path)
+	// A second instance (another component, or a duplicate spawn) must not
+	// fight over the pipe. Pipe connectability is the whole test: if a server
+	// is listening, this instance is redundant and exits quietly.
+	if pipeAlive(path, 500*time.Millisecond) {
+		log.Infof("another bridge already serves %s; exiting", path)
 		return 0
 	}
 
@@ -99,7 +104,10 @@ func run(args []string) int {
 		go watchParent(ctx, *parentPID, stop, log)
 	}
 
+	// The session starts connecting right away, in the background: the first
+	// status and the first request then already have something to report.
 	mgr := spotifyx.NewManager(ctx, log)
+	mgr.Start()
 	defer mgr.Close()
 
 	srv := bridge.NewServer(ctx, log, mgr)
@@ -115,12 +123,12 @@ func run(args []string) int {
 }
 
 // serve listens, retrying when a concurrently starting bridge wins the race for
-// the pipe: whoever answers status keeps serving, the other one exits quietly.
+// the pipe: whoever listens keeps serving, the other one exits quietly.
 func serve(srv *bridge.Server, name, path string, log *logging.Logger) error {
 	err := srv.ListenAndServe(name)
 	for attempt := 0; err != nil && attempt < 4; attempt++ {
 		time.Sleep(300 * time.Millisecond)
-		if otherAnswers(path, time.Second) {
+		if pipeAlive(path, time.Second) {
 			log.Infof("another bridge answered on %s; exiting", path)
 			return nil
 		}
@@ -162,46 +170,102 @@ func openLog(debug bool) (*logging.Logger, func(), error) {
 	return log, func() { _ = f.Close() }, nil
 }
 
-// otherAnswers reports whether a bridge is already serving on path.
-func otherAnswers(path string, timeout time.Duration) bool {
+// pipeAlive reports whether a server is accepting connections on path. A
+// successful dial is proof enough; no request is sent.
+func pipeAlive(path string, timeout time.Duration) bool {
 	conn, err := winio.DialPipe(path, &timeout)
 	if err != nil {
 		return false
 	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return false
-	}
-	if _, err := conn.Write([]byte(`{"op":"status"}` + "\n")); err != nil {
-		return false
-	}
-	line, err := bufio.NewReaderSize(conn, 64<<10).ReadBytes('\n')
-	return err == nil && json.Valid(bytes.TrimSpace(line))
+	_ = conn.Close()
+	return true
 }
 
-// watchParent cancels the bridge when pid exits.
+// watchParent shuts the bridge down when pid exits.
+//
+// The wait result is verified before it is acted on: a process handle is
+// signaled only by termination, but GetExitCodeProcess is the authoritative
+// answer (STILL_ACTIVE means the process is alive), and it also supplies the
+// exit code that makes the log line unambiguous. A failure to open the process
+// (access denied, a process that is still starting) is retried instead of being
+// treated as death, so an unreadable parent can never kill a healthy bridge.
 func watchParent(ctx context.Context, pid int, cancel func(), log *logging.Logger) {
-	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	handle, err := openParent(ctx, pid, log)
 	if err != nil {
-		log.Warnf("parent process %d is not running; exiting", pid)
-		cancel()
+		if errors.Is(err, errParentGone) {
+			log.Warnf("parent process %d does not exist; shutting down", pid)
+			cancel()
+		}
 		return
 	}
-	defer windows.CloseHandle(h)
+	defer windows.CloseHandle(handle) //nolint:errcheck
 
 	log.Infof("watching parent process %d", pid)
+
 	for {
-		event, err := windows.WaitForSingleObject(h, 1000)
-		if err == nil && event == windows.WAIT_OBJECT_0 {
-			log.Infof("parent process %d exited", pid)
+		event, err := windows.WaitForSingleObject(handle, 1000)
+		switch {
+		case err != nil:
+			log.WithError(err).Warnf("waiting for parent process %d failed; still watching", pid)
+		case event == windows.WAIT_OBJECT_0:
+			var code uint32
+			if err := windows.GetExitCodeProcess(handle, &code); err != nil {
+				log.WithError(err).Warnf("parent process %d wait signaled, exit code unknown; shutting down", pid)
+				cancel()
+				return
+			}
+			if code == stillActive {
+				// Should not happen, but never shut down on a doubtful signal.
+				log.Warnf("parent process %d wait signaled but it is still active; continuing", pid)
+				break
+			}
+			log.Infof("parent process %d exited (exit code %d); shutting down", pid, code)
 			cancel()
 			return
+		case event == uint32(windows.WAIT_TIMEOUT):
+			// The parent is still running.
+		default:
+			log.Warnf("unexpected wait result %#x for parent process %d; still watching", event, pid)
 		}
+
 		select {
 		case <-ctx.Done():
 			return
 		default:
+		}
+	}
+}
+
+// stillActive is STILL_ACTIVE from GetExitCodeProcess.
+const stillActive = 259
+
+var errParentGone = errors.New("parent process does not exist")
+
+// openParent retries opening the parent handle when the failure is transient
+// (access denied or a pid that is still being created), and reports
+// errParentGone only when Windows says no such process exists.
+func openParent(ctx context.Context, pid int, log *logging.Logger) (windows.Handle, error) {
+	for attempt := 0; ; attempt++ {
+		h, err := windows.OpenProcess(
+			windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+		if err == nil {
+			return h, nil
+		}
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			// OpenProcess reports a pid that names no process this way.
+			return 0, errParentGone
+		}
+		log.WithError(err).Warnf("cannot open parent process %d; retrying", pid)
+		select {
+		case <-ctx.Done():
+			return 0, err
+		case <-time.After(500 * time.Millisecond):
+		}
+		if attempt >= 20 {
+			// Ten seconds of failures: keep serving anyway rather than kill a
+			// bridge that is only unable to query its parent.
+			log.Warnf("giving up watching parent process %d after repeated open failures", pid)
+			return 0, err
 		}
 	}
 }
