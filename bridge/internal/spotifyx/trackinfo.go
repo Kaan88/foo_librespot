@@ -28,6 +28,10 @@ type TrackInfo struct {
 	AlbumGainDB *float64 `json:"album_gain_db"`
 	AlbumPeak   *float64 `json:"album_peak"`
 	Playable    bool     `json:"playable"`
+	// AlbumURI and ArtistURIs are optional (v3): the album and the artists of
+	// the track, for "open album/artist".
+	AlbumURI   string   `json:"album_uri,omitempty"`
+	ArtistURIs []string `json:"artist_uris,omitempty"`
 }
 
 // trackMeta is what a batched metadata request knows about one track.
@@ -58,9 +62,13 @@ func BuildTrackInfo(uri string, meta *trackMeta, preferredBitrate int) TrackInfo
 		if name := a.GetName(); name != "" {
 			info.Artists = append(info.Artists, name)
 		}
+		if uri := artistURI(a.GetGid()); uri != "" {
+			info.ArtistURIs = append(info.ArtistURIs, uri)
+		}
 	}
 	if album := t.GetAlbum(); album != nil {
 		info.Album = album.GetName()
+		info.AlbumURI = albumURI(album.GetGid())
 		if artists := album.GetArtist(); len(artists) > 0 {
 			info.AlbumArtist = artists[0].GetName()
 		}

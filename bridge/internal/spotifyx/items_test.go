@@ -6,7 +6,29 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
 	playlist4pb "github.com/devgianlu/go-librespot/proto/spotify/playlist4"
+	"github.com/devgianlu/go-librespot/proto/spotify/playlist_permission"
 )
+
+func TestPlaylistEditable(t *testing.T) {
+	yes, no := true, false
+	tests := []struct {
+		name string
+		meta *playlist4pb.MetaItem
+		want bool
+	}{
+		{"owner", &playlist4pb.MetaItem{OwnerUsername: strptr("Me")}, true},
+		{"collaborative", &playlist4pb.MetaItem{OwnerUsername: strptr("x"), Attributes: &playlist4pb.ListAttributes{Collaborative: &yes}}, true},
+		{"capability", &playlist4pb.MetaItem{OwnerUsername: strptr("x"), Capabilities: &playlist_permission.Capabilities{CanEditItems: &yes}}, true},
+		{"capability off", &playlist4pb.MetaItem{OwnerUsername: strptr("x"), Capabilities: &playlist_permission.Capabilities{CanEditItems: &no}}, false},
+		{"other", &playlist4pb.MetaItem{OwnerUsername: strptr("x")}, false},
+		{"no owner info", &playlist4pb.MetaItem{}, false},
+	}
+	for _, tc := range tests {
+		if got := playlistEditable(tc.meta, "me"); got != tc.want {
+			t.Errorf("%s: editable = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
 
 func TestRevisionHash(t *testing.T) {
 	a := revisionHash([]string{"spotify:track:a", "spotify:track:b"})
@@ -97,7 +119,7 @@ func rootlistContent() *playlist4pb.SelectedListContent {
 }
 
 func TestSplitRootlist(t *testing.T) {
-	madeFor, playlists := splitRootlist(rootlistContent())
+	madeFor, playlists := splitRootlist(rootlistContent(), "testuser0001")
 
 	if len(madeFor) != 1 {
 		t.Fatalf("made for you = %d items, want 1: %+v", len(madeFor), madeFor)
@@ -130,14 +152,20 @@ func TestSplitRootlist(t *testing.T) {
 	if sare.ImageURL != nil {
 		t.Errorf("sare image = %v, want nil", *sare.ImageURL)
 	}
+	if sare.Editable == nil || !*sare.Editable {
+		t.Errorf("own playlist should be editable: %v", sare.Editable)
+	}
 	wave := playlists[1]
+	if wave.Editable == nil || *wave.Editable {
+		t.Errorf("another user's playlist should not be editable: %v", wave.Editable)
+	}
 	if wave.ImageURL == nil || *wave.ImageURL != "https://u.scdn.co/images/pl/default/abcd" {
 		t.Errorf("wave image = %v", wave.ImageURL)
 	}
 }
 
 func TestSplitRootlistEmpty(t *testing.T) {
-	madeFor, playlists := splitRootlist(nil)
+	madeFor, playlists := splitRootlist(nil, "tester")
 	if madeFor == nil || playlists == nil || len(madeFor) != 0 || len(playlists) != 0 {
 		t.Errorf("empty rootlist = %v / %v, want empty non-nil slices", madeFor, playlists)
 	}

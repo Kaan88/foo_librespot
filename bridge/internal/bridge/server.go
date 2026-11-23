@@ -151,6 +151,14 @@ func (s *Server) handle(conn net.Conn) {
 		s.search(ctx, conn, &req)
 	case "artist":
 		s.artist(ctx, conn, &req)
+	case "saved":
+		s.saved(ctx, conn, &req)
+	case "save", "unsave":
+		s.setSaved(ctx, conn, &req)
+	case "playlist_add":
+		s.playlistAdd(ctx, conn, &req)
+	case "radio":
+		s.radio(ctx, conn, &req)
 	default:
 		s.writeError(conn, badRequest(fmt.Sprintf("unknown op %q", req.Op)))
 	}
@@ -184,6 +192,41 @@ func (s *Server) resolve(ctx context.Context, conn net.Conn, req *request) {
 	}
 
 	tracks, info, err := s.mgr.Resolve(ctx, ref)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, resolveResponse{OK: true, Tracks: tracks, Context: info})
+}
+
+func (s *Server) saved(ctx context.Context, conn net.Conn, req *request) {
+	found, err := s.mgr.Saved(ctx, req.URIs)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, savedResponse{OK: true, Saved: found})
+}
+
+func (s *Server) setSaved(ctx context.Context, conn net.Conn, req *request) {
+	if err := s.mgr.SetSaved(ctx, req.URIs, req.Op == "save"); err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, okResponse{OK: true})
+}
+
+func (s *Server) playlistAdd(ctx context.Context, conn net.Conn, req *request) {
+	res, err := s.mgr.PlaylistAdd(ctx, req.Playlist, req.URIs, req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, playlistAddResponse{OK: true, Revision: res.Revision, DryRun: req.DryRun, Request: res.Request})
+}
+
+func (s *Server) radio(ctx context.Context, conn net.Conn, req *request) {
+	tracks, info, err := s.mgr.Radio(ctx, req.URI)
 	if err != nil {
 		s.writeError(conn, err)
 		return
@@ -444,6 +487,10 @@ func describe(req *request) string {
 			start = *req.StartMs
 		}
 		return fmt.Sprintf("open %s at %d ms", uri, start)
+	case "saved", "save", "unsave":
+		return fmt.Sprintf("%s with %d uris", req.Op, len(req.URIs))
+	case "playlist_add":
+		return fmt.Sprintf("playlist_add %s with %d uris (dry_run=%v)", req.Playlist, len(req.URIs), req.DryRun)
 	case "search":
 		return fmt.Sprintf("search %q (limit %d)", req.Query, requestedLimit(req))
 	default:

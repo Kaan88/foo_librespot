@@ -29,6 +29,9 @@ type request struct {
 	Bitrate *int     `json:"bitrate"`
 	Query   string   `json:"query"`
 	Limit   *int     `json:"limit"`
+	// Playlist and DryRun belong to playlist_add.
+	Playlist string `json:"playlist"`
+	DryRun   bool   `json:"dry_run"`
 }
 
 type statusResponse struct {
@@ -75,6 +78,23 @@ type artistResponse struct {
 	Singles   []spotifyx.Item      `json:"singles"`
 }
 
+type savedResponse struct {
+	OK    bool   `json:"ok"`
+	Saved []bool `json:"saved"`
+}
+
+type okResponse struct {
+	OK bool `json:"ok"`
+}
+
+type playlistAddResponse struct {
+	OK       bool   `json:"ok"`
+	Revision string `json:"revision"`
+	// DryRun and Request are set when nothing was sent.
+	DryRun  bool                      `json:"dry_run,omitempty"`
+	Request *spotifyx.PlaylistRequest `json:"request,omitempty"`
+}
+
 type openHeader struct {
 	OK         bool               `json:"ok"`
 	Track      spotifyx.TrackInfo `json:"track"`
@@ -105,6 +125,8 @@ func codeFor(err error) string {
 	switch {
 	case errors.As(err, &ae):
 		return ae.code
+	case spotifyx.IsBadInput(err):
+		return CodeBadRequest
 	case errors.Is(err, spotifyx.ErrNotLoggedIn):
 		return CodeNotLoggedIn
 	case spotifyx.IsConnectError(err):

@@ -28,6 +28,11 @@ const usage = `Usage:
   bridgectl [--pipe <name>] library
   bridgectl [--pipe <name>] search <query> [--limit N]
   bridgectl [--pipe <name>] artist <uri-or-url>
+  bridgectl [--pipe <name>] saved <track-uri>...
+  bridgectl [--pipe <name>] save <track-uri>...
+  bridgectl [--pipe <name>] unsave <track-uri>...
+  bridgectl [--pipe <name>] playlist-add <playlist-uri> <track-uri>... [--dry-run]
+  bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
   bridgectl [--pipe <name>] open-to-wav <uri-or-url> <out.wav> [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 
 Commands:
@@ -37,6 +42,10 @@ Commands:
   library        List the Spotify tab's sections.
   search         Search Spotify (tracks, albums, artists).
   artist         Fetch an artist page: top tracks, albums, singles.
+  saved          Tell which tracks are in Liked Songs.
+  save, unsave   Add tracks to / remove them from Liked Songs.
+  playlist-add   Append tracks to a playlist (--dry-run: show the request, send nothing).
+  radio          Tracks of a radio seeded by a track, artist, album or playlist.
   open-to-wav    Open a track, print the header and write the PCM to a WAV.
 `
 
@@ -95,6 +104,20 @@ func run(args []string) int {
 			return 2
 		}
 		return doJSON(*pipe, map[string]any{"op": "artist", "uri": rest[1]})
+	case "saved", "save", "unsave":
+		if len(rest) < 2 {
+			fmt.Fprintf(os.Stderr, "bridgectl: %s needs at least one track uri\n", rest[0])
+			return 2
+		}
+		return doJSON(*pipe, map[string]any{"op": rest[0], "uris": rest[1:]})
+	case "playlist-add":
+		return doPlaylistAdd(*pipe, rest[1:])
+	case "radio":
+		if len(rest) != 2 {
+			fmt.Fprintln(os.Stderr, "bridgectl: radio needs one uri")
+			return 2
+		}
+		return doJSON(*pipe, map[string]any{"op": "radio", "uri": rest[1]})
 	case "open-to-wav":
 		return doOpen(*pipe, rest[1:])
 	default:
@@ -116,6 +139,29 @@ func doInfo(pipe string, args []string) int {
 		return 2
 	}
 	return doJSON(pipe, map[string]any{"op": "info", "uris": positional, "bitrate": *bitrate})
+}
+
+func doPlaylistAdd(pipe string, args []string) int {
+	dryRun := false
+	var positional []string
+	for _, arg := range args {
+		switch arg {
+		case "--dry-run", "-dry-run":
+			dryRun = true
+		default:
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, "bridgectl: playlist-add needs <playlist-uri> <track-uri>... [--dry-run]")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{
+		"op":       "playlist_add",
+		"playlist": positional[0],
+		"uris":     positional[1:],
+		"dry_run":  dryRun,
+	})
 }
 
 func doSearch(pipe string, args []string) int {
