@@ -144,7 +144,7 @@ func (m *Manager) buildLibrary(ctx context.Context, env *Env) ([]Section, error)
 	liked := collectionURIs(collection, "spotify:track:")
 	albumURIs := collectionURIs(collection, "spotify:album:")
 	artistURIs := collectionURIs(artistSet, "spotify:artist:")
-	madeFor, playlists := splitRootlist(rootlist)
+	madeFor, playlists := splitRootlist(rootlist, username)
 
 	albumByURI := m.albumItems(ctx, env, albumURIs)
 	artistByURI := m.artistItems(ctx, env, artistURIs)

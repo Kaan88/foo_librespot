@@ -498,7 +498,11 @@ func IsPermanent(err error) bool {
 	if errors.Is(err, ErrNotLoggedIn) {
 		return true
 	}
-	if IsUnsupported(err) {
+	if IsUnsupported(err) || IsBadInput(err) {
+		return true
+	}
+	var fe *finalError
+	if errors.As(err, &fe) {
 		return true
 	}
 	var cre *spclient.ContextResolveError

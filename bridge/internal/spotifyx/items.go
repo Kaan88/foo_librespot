@@ -32,6 +32,8 @@ type Item struct {
 	ImageURL   *string `json:"image_url"`
 	TrackCount *int    `json:"track_count"`
 	Revision   *string `json:"revision"`
+	// Editable is set on playlist items only: whether the user can add tracks.
+	Editable *bool `json:"editable,omitempty"`
 }
 
 // ContextInfo is the optional "context" object of a resolve reply.
@@ -191,7 +193,7 @@ func rootlistImage(attrs *playlist4pb.ListAttributes) string {
 // splitRootlist turns a decorated rootlist into the "made for you" and "your
 // playlists" lists. Folders (and anything that is not a playlist) are skipped;
 // Spotify-owned playlists count as made for you.
-func splitRootlist(rl *playlist4pb.SelectedListContent) (madeFor, playlists []Item) {
+func splitRootlist(rl *playlist4pb.SelectedListContent, username string) (madeFor, playlists []Item) {
 	items := rl.GetContents().GetItems()
 	metas := rl.GetContents().GetMetaItems()
 
@@ -208,6 +210,8 @@ func splitRootlist(rl *playlist4pb.SelectedListContent) (madeFor, playlists []It
 
 		item := playlistItem(uri, attrs.GetName(), owner, rootlistImage(attrs),
 			int(meta.GetLength()), itemRevision(meta.GetRevision()))
+		editable := playlistEditable(meta, username)
+		item.Editable = &editable
 		if strings.EqualFold(owner, "spotify") {
 			madeFor = append(madeFor, item)
 		} else {
@@ -215,6 +219,19 @@ func splitRootlist(rl *playlist4pb.SelectedListContent) (madeFor, playlists []It
 		}
 	}
 	return madeFor, playlists
+}
+
+// playlistEditable tells whether the user can add tracks to a rootlist
+// playlist: they own it, it is collaborative, or the playlist service's
+// capabilities say they may edit its items.
+func playlistEditable(meta *playlist4pb.MetaItem, username string) bool {
+	if owner := meta.GetOwnerUsername(); owner != "" && username != "" && strings.EqualFold(owner, username) {
+		return true
+	}
+	if meta.GetAttributes().GetCollaborative() {
+		return true
+	}
+	return meta.GetCapabilities().GetCanEditItems()
 }
 
 // likedItem is the single Liked Songs entry of the library.

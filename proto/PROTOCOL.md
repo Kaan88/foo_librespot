@@ -120,13 +120,22 @@ New requests use the same error codes. A feature that go-librespot can't reach a
 `{"op":"unsave","uris":[...]}` -> `{"ok":true}`
 - Afterwards the Liked Songs revision changes, so a sync picks it up.
 
+### track_info additions (optional fields)
+`<track_info>` gains two optional fields, present whenever the track's metadata is known (omitted for unknown tracks):
+- `"album_uri":"spotify:album:ID"`
+- `"artist_uris":["spotify:artist:ID", ...]` (one per credited artist that has an id, in the order of `artists`)
+Clients use them for "Open album" / "Open artist".
+
 ### playlist_add  (add tracks to one of the user's Spotify playlists)
 `{"op":"playlist_add","playlist":"spotify:playlist:ID","uris":["spotify:track:ID",...]}` -> `{"ok":true,"revision":"..."}`
 - Appends at the end. Fails with `bad_request` if the user can't edit that playlist.
-- `library` items for playlists get an optional `"editable":true|false` so clients can list only playlists they can add to.
+- `library` items for playlists get an optional `"editable":true|false` so clients can list only playlists they can add to. It is true when the user owns the playlist, it is collaborative, or the playlist service's capabilities say `can_edit_items`.
+- Optional request field `"dry_run":true`: the bridge reads the playlist's current revision, builds the change and returns it without sending: `{"ok":true,"revision":"<base revision>","dry_run":true,"request":{"method":"POST","path":"/playlist/v2/playlist/ID/changes","body_text":"<ListChanges, protobuf text>","body_len":98}}`.
+- A 403/404 from Spotify (not allowed to edit, or no such playlist) answers `bad_request`; any other refusal answers `unsupported` with Spotify's message. A 409 (playlist changed meanwhile) is retried once with the fresh revision.
 
 ### radio  (tracks for a radio based on a track, artist, album or playlist)
 `{"op":"radio","uri":"spotify:track:ID"}` -> same reply shape as `resolve` (with `context`: name like "<title> Radio", uri of the radio/station context).
+- Seeds: track, artist, album or playlist. `context.uri` is `spotify:station:<kind>:<id>`, `context.owner` is `Spotify`, `revision` is a hash of the returned track list (a radio changes on every call). Usually 50 tracks; for a track seed the seed itself is first.
 
 ### Errors
 If Spotify rejects a write from this kind of login, answer `{"ok":false,"code":"unsupported","error":"<what Spotify said>"}`, never a fake success.

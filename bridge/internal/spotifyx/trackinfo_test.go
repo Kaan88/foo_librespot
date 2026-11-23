@@ -1,7 +1,9 @@
 package spotifyx
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	audiofilespb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata/audiofiles"
@@ -110,6 +112,31 @@ func TestBuildTrackInfoUnknown(t *testing.T) {
 	info := BuildTrackInfo("spotify:track:x", nil, 320)
 	if info.Playable || info.Artists == nil || info.URI != "spotify:track:x" {
 		t.Errorf("info = %+v", info)
+	}
+}
+
+func TestBuildTrackInfoURIs(t *testing.T) {
+	gid := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	agid := []byte{16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+	meta := &trackMeta{Track: &metadatapb.Track{
+		Name:   strptr("x"),
+		Artist: []*metadatapb.Artist{{Name: strptr("A"), Gid: agid}, {Name: strptr("B")}},
+		Album:  &metadatapb.Album{Name: strptr("Al"), Gid: gid},
+	}}
+	info := BuildTrackInfo("spotify:track:t", meta, 320)
+	if info.AlbumURI != albumURI(gid) || info.AlbumURI == "" {
+		t.Errorf("album_uri = %q", info.AlbumURI)
+	}
+	if len(info.ArtistURIs) != 1 || info.ArtistURIs[0] != artistURI(agid) {
+		t.Errorf("artist_uris = %v", info.ArtistURIs)
+	}
+	raw, _ := json.Marshal(info)
+	if !strings.Contains(string(raw), `"album_uri":"spotify:album:`) || !strings.Contains(string(raw), `"artist_uris":["spotify:artist:`) {
+		t.Errorf("json = %s", raw)
+	}
+	raw, _ = json.Marshal(BuildTrackInfo("spotify:track:u", nil, 320))
+	if strings.Contains(string(raw), "album_uri") || strings.Contains(string(raw), "artist_uris") {
+		t.Errorf("unknown track should omit the optional fields: %s", raw)
 	}
 }
 

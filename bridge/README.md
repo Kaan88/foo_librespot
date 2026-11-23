@@ -195,6 +195,29 @@ involved.
   groups, single groups) and resolves the release names and covers with batched
   `ALBUM_V4`.
 
+### Phase 4: saved, save/unsave, playlist_add, radio
+
+All through spclient (the public Web API answers 429 for this login's token):
+
+- `saved` — `POST /collection/v2/contains` (set `collection`, protobuf
+  `ContainsRequest`/`ContainsResponse`).
+- `save` / `unsave` — `POST /collection/v2/write` (set `collection`,
+  `WriteRequest`, items with `added_at` or `is_removed`). Afterwards the cached
+  library is dropped; the Liked Songs revision is a hash of the freshly read
+  collection, so it changes right away.
+- `playlist_add` — `GET /playlist/v2/playlist/<id>?decorate=revision` for the
+  base revision, then `POST /playlist/v2/playlist/<id>/changes` with a
+  playlist4 `ListChanges` holding one `ADD` op (`add_last`). The reply carries
+  the revision read again afterwards. `dry_run` stops after building the
+  request. The POST is never resent automatically (it is not idempotent), except
+  for one retry on 409 with a fresh revision.
+- `radio` — tried in order: context resolver on `spotify:station:<kind>:<id>`
+  (this is what answers), `POST /context-resolve/v1/autoplay`, and
+  `GET /radio-apollo/v3/stations/<seed uri>`. The first one that yields tracks
+  wins and is logged (`radio for ...: N tracks via ...`).
+- `library` playlist items carry `editable`; `track_info` carries `album_uri`
+  and `artist_uris`.
+
 ### Item images
 
 Covers and portraits are the largest `i.scdn.co` image of the metadata. A
@@ -242,6 +265,9 @@ bridgectl [--pipe <name>] info <uri-or-url>... [--bitrate 96|160|320]
 bridgectl [--pipe <name>] library
 bridgectl [--pipe <name>] search <query> [--limit N]
 bridgectl [--pipe <name>] artist <uri-or-url>
+bridgectl [--pipe <name>] saved|save|unsave <track-uri>...
+bridgectl [--pipe <name>] playlist-add <playlist-uri> <track-uri>... [--dry-run]
+bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
 bridgectl [--pipe <name>] open-to-wav <uri> <out.wav>
           [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 ```
