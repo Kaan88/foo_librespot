@@ -10,3 +10,4 @@ component/ARM64/
 component/.vs/
 *.user
 *.log
+backup/

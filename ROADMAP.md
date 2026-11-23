@@ -20,7 +20,7 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 
 ## Next
 
-### Phase 3: Spotify tab and synced playlists ⬅ next
+### Phase 3: Spotify tab and synced playlists ✅
 
 **Spotify tab** (a panel of its own, next to Playlists / Properties / ReFacets)
 - A tree:
@@ -42,12 +42,12 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 - Search.
 - Artist and album pages.
 
-### Phase 4: right-click menu
+### Phase 4: right-click menu ✅ (works in foobar2000, 2026-11-23)
 - A Spotify submenu: Save to Liked Songs, Open album, Open artist, Start radio, Add to Spotify playlist, Copy link.
 - Write actions (save, edit playlists, radio) need a Spotify Web API token. Check first that one can come from the existing librespot login.
 - Drag and drop or paste `open.spotify.com` / `spotify:` links straight into playlists. This needs a filesystem service for `spotify:` paths.
 
-### Phase 5: polish (optional)
+### Phase 5: polish (optional) ⬅ next
 - Audio cache size setting; clearer errors (Premium expired, rate limited, region).
 - Album ReplayGain values.
 - Spotify Connect: control foobar2000 from the phone (largest item, last).
@@ -60,8 +60,9 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
   - (b) change the script to treat paths starting with `spotify:` as Spotify.
   - Do (a) and tell the user which field to use.
 - **Seek accuracy relies on a private go-librespot value** (the Vorbis decoder's granule position, read through reflection). A go-librespot upgrade could break it; the bridge then decodes from the start of the track, which is exact but slower. Recheck after every go-librespot update.
+- **Known Phase 4 limits:** search can't return playlists (no endpoint reachable from this login); `playlist_add` hasn't had a real write yet (dry run only); dropping `https://open.spotify.com` URLs depends on foobar2000 asking our filesystem before its HTTP one.
 - **Leftover worktree folders** `Desktop\fbp-bridge`, `Desktop\fbp-component` and `Desktop\foobar_plugin-phase0` are locked and still need deleting, along with the `bridge-v1` / `component-v1` branches.
 
 ## Working agreement
-- DeepSeek Flash writes the code on its own branch and worktree. Claude reviews it, rebuilds independently and merges into main.
+- The implementing model (DeepSeek Flash earlier, now cc-sonnet = opencode `claude-code/sonnet`) writes the code on its own branch and worktree. Claude reviews it, rebuilds independently and merges into main.
 - Install target: portable 32-bit foobar2000 at `Desktop\foobar2000`, in `profile\user-components\foo_librespot\`. Close foobar2000 before swapping the DLL.
