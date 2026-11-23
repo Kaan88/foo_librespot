@@ -150,6 +150,11 @@
     <ClCompile Include="src\sync_plan.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="src\spotify_links.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\spotify_filesystem.cpp" />
+    <ClCompile Include="src\spotify_menu.cpp" />
     <ClCompile Include="src\spotify_playlists.cpp" />
     <ClCompile Include="src\spotify_commands.cpp" />
     <ClCompile Include="src\spotify_tab.cpp" />

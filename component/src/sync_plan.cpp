@@ -16,6 +16,18 @@ struct uri_state {
 
 } // namespace
 
+std::vector<insert_run> group_insertions(const std::vector<sync_insertion>& insertions) {
+	std::vector<insert_run> runs;
+	for (const sync_insertion& insertion : insertions) {
+		if (!runs.empty() && insertion.index == runs.back().index + runs.back().uris.size()) {
+			runs.back().uris.push_back(insertion.uri);
+		} else {
+			runs.push_back(insert_run{ insertion.index, { insertion.uri } });
+		}
+	}
+	return runs;
+}
+
 sync_plan make_sync_plan(const std::vector<std::string>& old_uris,
 	const std::vector<std::string>& new_uris, const std::vector<size_t>& protect_old) {
 	sync_plan plan;

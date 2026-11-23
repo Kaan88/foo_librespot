@@ -43,6 +43,16 @@ struct sync_plan {
 	}
 };
 
+// A run of new items that occupy consecutive final positions.
+struct insert_run {
+	size_t index = 0; // final position of the first item
+	std::vector<std::string> uris;
+};
+
+// Groups plan.insert (ascending final indices) into contiguous runs. Applying
+// the runs in order, each at its `index`, equals applying every insertion.
+std::vector<insert_run> group_insertions(const std::vector<sync_insertion>& insertions);
+
 sync_plan make_sync_plan(const std::vector<std::string>& old_uris,
 	const std::vector<std::string>& new_uris,
 	const std::vector<size_t>& protect_old = std::vector<size_t>());

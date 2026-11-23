@@ -4,6 +4,7 @@
 // result equals the new URI list, which validates the remove -> reorder ->
 // insert semantics used by spotify_playlists.cpp.
 
+#include "../../src/spotify_links.h"
 #include "../../src/sync_plan.h"
 
 #include <algorithm>
@@ -51,12 +52,14 @@ std::vector<std::string> apply_plan(const std::vector<std::string>& old_uris,
 		items = reordered;
 	}
 
-	for (const flp::sync_insertion& insertion : plan.insert) {
-		if (insertion.index > items.size()) {
+	// Insert by contiguous runs, as spotify_playlists.cpp does.
+	for (const flp::insert_run& run : flp::group_insertions(plan.insert)) {
+		if (run.index > items.size()) {
 			check(false, "insert index out of range");
 			return items;
 		}
-		items.insert(items.begin() + static_cast<std::ptrdiff_t>(insertion.index), insertion.uri);
+		items.insert(items.begin() + static_cast<std::ptrdiff_t>(run.index), run.uris.begin(),
+			run.uris.end());
 	}
 
 	check(items == new_uris, "applying the plan produces the new list");
@@ -147,6 +150,62 @@ void test_ignores_invalid_protect_index() {
 	check(plan.no_change(), "out-of-range protected index is ignored");
 }
 
+void test_insert_runs() {
+	// First load: everything is one run, i.e. one playlist_insert_items call.
+	const auto fresh = flp::make_sync_plan({}, { "a", "b", "c", "d" });
+	const auto freshRuns = flp::group_insertions(fresh.insert);
+	check(freshRuns.size() == 1 && freshRuns[0].index == 0 && freshRuns[0].uris.size() == 4,
+		"first load is a single contiguous run");
+
+	const auto split = flp::make_sync_plan({ "b", "d" }, { "a", "b", "c", "d", "e", "f" });
+	const auto runs = flp::group_insertions(split.insert);
+	check(runs.size() == 3, "separated inserts become separate runs");
+	check(runs.size() == 3 && runs[0].index == 0 && runs[1].index == 2 && runs[2].index == 4 &&
+		runs[2].uris.size() == 2, "run positions and sizes");
+	expect_plan("runs: interleaved", { "b", "d" }, { "a", "b", "c", "d", "e", "f" }, 0, 4, { 0, 1 });
+	check(flp::group_insertions({}).empty(), "no insertions, no runs");
+}
+
+void test_links() {
+	using flp::link_kind;
+	const auto track = flp::parse_spotify_link("spotify:track:4uLU6hMCjMI75M1A2tKUQC");
+	check(track.kind == link_kind::track && track.uri == "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+		"spotify: track URI");
+	const auto album = flp::parse_spotify_link("  spotify:album:4aawyAB9vmqN3uQ7FjRGTy  ");
+	check(album.kind == link_kind::album && album.id == "4aawyAB9vmqN3uQ7FjRGTy", "album URI, trimmed");
+	check(flp::parse_spotify_link("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M").kind == link_kind::playlist,
+		"playlist URI");
+	check(flp::parse_spotify_link("spotify:artist:0OdUWJ0sBjDrqHygGUXeCF").kind == link_kind::artist,
+		"artist URI");
+	const auto legacy = flp::parse_spotify_link("spotify:user:someone:playlist:37i9dQZF1DXcBWIGoYBM5M");
+	check(legacy.kind == link_kind::playlist && legacy.uri == "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
+		"legacy user playlist URI is canonicalised");
+
+	const auto url = flp::parse_spotify_link(
+		"https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abcdef123");
+	check(url.uri == "spotify:track:4uLU6hMCjMI75M1A2tKUQC", "track URL with ?si=");
+	check(flp::parse_spotify_link("https://open.spotify.com/intl-de/album/4aawyAB9vmqN3uQ7FjRGTy").uri ==
+		"spotify:album:4aawyAB9vmqN3uQ7FjRGTy", "URL with intl- prefix");
+	check(flp::parse_spotify_link("http://OPEN.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M/").uri ==
+		"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M", "http, upper-case host, trailing slash");
+	check(flp::parse_spotify_link("https://open.spotify.com/user/someone/playlist/37i9dQZF1DXcBWIGoYBM5M").uri ==
+		"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M", "URL with user prefix");
+	check(flp::parse_spotify_link("https://open.spotify.com/artist/0OdUWJ0sBjDrqHygGUXeCF#x").kind ==
+		link_kind::artist, "URL with fragment");
+
+	check(!flp::parse_spotify_link("https://example.com/track/4uLU6hMCjMI75M1A2tKUQC"), "other host");
+	check(!flp::parse_spotify_link("https://open.spotify.com.evil.com/track/abc"), "look-alike host");
+	check(!flp::parse_spotify_link("https://open.spotify.com/show/abc"), "unsupported kind (show)");
+	check(!flp::parse_spotify_link("spotify:track:"), "empty id");
+	check(!flp::parse_spotify_link("spotify:track:ab/cd"), "bad characters in id");
+	check(!flp::parse_spotify_link("C:\\music\\a.flac"), "local path");
+	check(!flp::parse_spotify_link(""), "empty string");
+
+	check(flp::spotify_web_url("spotify:track:4uLU6hMCjMI75M1A2tKUQC") ==
+		"https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", "web URL from URI");
+	check(flp::spotify_web_url("nope").empty(), "web URL of a non-Spotify string is empty");
+}
+
 } // namespace
 
 int main() {
@@ -158,6 +217,8 @@ int main() {
 	test_protected_duplicates();
 	test_combined();
 	test_ignores_invalid_protect_index();
+	test_insert_runs();
+	test_links();
 
 	if (g_failures != 0) {
 		std::printf("%d sync plan test(s) FAILED\n", g_failures);

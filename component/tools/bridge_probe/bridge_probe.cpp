@@ -43,16 +43,16 @@ void print_status(const flp::bridge_status& status) {
 
 void print_track(const flp::track_info& track) {
 	std::printf("track uri=%s title=%s artists=%zu album=%s duration_ms=%lld bitrate=%d "
-				"gain=%s peak=%s\n",
+				"gain=%s peak=%s album_uri=%s artist_uris=%zu\n",
 		track.uri.c_str(), track.title.c_str(), track.artists.size(), track.album.c_str(),
 		track.duration_ms, track.bitrate, track.has_track_gain ? "yes" : "no",
-		track.has_track_peak ? "yes" : "no");
+		track.has_track_peak ? "yes" : "no", track.album_uri.c_str(), track.artist_uris.size());
 }
 
 void print_item(const flp::library_item& item) {
-	std::printf("item uri=%s kind=%s name=%s subtitle=%s count=%lld revision=%s\n",
+	std::printf("item uri=%s kind=%s name=%s subtitle=%s count=%lld revision=%s editable=%s\n",
 		item.uri.c_str(), item.kind.c_str(), item.name.c_str(), item.subtitle.c_str(),
-		item.track_count, item.revision.c_str());
+		item.track_count, item.revision.c_str(), item.editable ? "true" : "false");
 }
 
 int run_status(flp::bridge_client& client) {
@@ -118,6 +118,39 @@ int run_artist(flp::bridge_client& client, const std::string& uri) {
 	for (const flp::library_item& item : result.albums) print_item(item);
 	for (const flp::library_item& item : result.singles) print_item(item);
 	return result.albums.empty() ? 4 : 0;
+}
+
+int run_saved(flp::bridge_client& client, const std::vector<std::string>& uris) {
+	const std::vector<bool> flags = client.saved(uris, never_cancel());
+	std::printf("saved");
+	for (const bool flag : flags) std::printf(" %s", flag ? "true" : "false");
+	std::printf("\n");
+	return flags.size() == uris.size() ? 0 : 4;
+}
+
+int run_save(flp::bridge_client& client, bool save, const std::vector<std::string>& uris) {
+	if (save) client.save(uris, never_cancel());
+	else client.unsave(uris, never_cancel());
+	std::printf("%s ok count=%zu\n", save ? "save" : "unsave", uris.size());
+	return 0;
+}
+
+int run_playlist_add(flp::bridge_client& client, const std::string& playlist,
+	const std::vector<std::string>& uris) {
+	const std::string revision = client.playlist_add(playlist, uris, never_cancel());
+	std::printf("playlist_add ok revision=%s\n", revision.c_str());
+	return 0;
+}
+
+int run_radio(flp::bridge_client& client, const std::string& uri) {
+	const flp::resolve_result radio = client.radio(uri, never_cancel());
+	std::printf("radio count=%zu\n", radio.tracks.size());
+	if (radio.has_context) {
+		std::printf("context uri=%s name=%s owner=%s revision=%s track_count=%lld\n",
+			radio.context.uri.c_str(), radio.context.name.c_str(), radio.context.owner.c_str(),
+			radio.context.revision.c_str(), radio.context.track_count);
+	}
+	return radio.tracks.empty() ? 4 : 0;
 }
 
 int run_control(flp::bridge_client& client, const std::string& revision, int tracks) {
@@ -247,7 +280,7 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName) {
 
 void usage() {
 	std::printf("usage: bridge_probe [--pipe NAME] <status|info|resolve|library|search|artist|"
-				"control|play|spawn> ...\n");
+				"saved|save|unsave|playlist_add|radio|control|play|spawn> ...\n");
 }
 
 } // namespace
@@ -331,6 +364,33 @@ int main(int argc, char** argv) {
 				return 2;
 			}
 			return run_artist(client, arguments[1]);
+		}
+
+		if (mode == "saved" || mode == "save" || mode == "unsave") {
+			const std::vector<std::string> uris(arguments.begin() + 1, arguments.end());
+			if (uris.empty()) {
+				usage();
+				return 2;
+			}
+			if (mode == "saved") return run_saved(client, uris);
+			return run_save(client, mode == "save", uris);
+		}
+
+		if (mode == "playlist_add") {
+			if (arguments.size() < 3) {
+				usage();
+				return 2;
+			}
+			return run_playlist_add(client, arguments[1],
+				std::vector<std::string>(arguments.begin() + 2, arguments.end()));
+		}
+
+		if (mode == "radio") {
+			if (arguments.size() < 2) {
+				usage();
+				return 2;
+			}
+			return run_radio(client, arguments[1]);
 		}
 
 		if (mode == "control") {
