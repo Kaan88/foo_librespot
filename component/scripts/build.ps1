@@ -2,7 +2,7 @@
 #
 #   .\scripts\build.ps1                      # Release x64
 #   .\scripts\build.ps1 -Configuration Debug -Platform x64
-#   .\scripts\build.ps1 -WithTools           # also build tools/fake_bridge + tools/bridge_probe
+#   .\scripts\build.ps1 -WithTools           # also build tools/fake_bridge, bridge_probe, metadata_probe, sync_plan_test
 #
 # The version of the SDK projects is retargeted to the locally installed
 # platform toolset with /p:PlatformToolset (VS 2026 = v145), without editing
@@ -74,6 +74,7 @@ if ($WithTools) {
     Invoke-MSBuild (Join-Path $componentDir "tools\fake_bridge\fake_bridge.vcxproj")
     Invoke-MSBuild (Join-Path $componentDir "tools\bridge_probe\bridge_probe.vcxproj")
     Invoke-MSBuild (Join-Path $componentDir "tools\metadata_probe\metadata_probe.vcxproj")
+    Invoke-MSBuild (Join-Path $componentDir "tools\sync_plan_test\sync_plan_test.vcxproj")
 }
 
 Write-Host "Build OK: $(Join-Path $componentDir "build\$Configuration\$Platform\foo_librespot.dll")"

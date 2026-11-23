@@ -10,3 +10,5 @@
 #define IDC_BITRATE     1004
 #define IDC_HINT        1005
 #define IDC_LINKS       1006
+#define IDC_SYNC        1007
+#define IDC_PREFIX      1008

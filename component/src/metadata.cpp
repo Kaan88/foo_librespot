@@ -30,6 +30,10 @@ void fill_file_info(const track_info& track, file_info& info) {
 	}
 	if (!track.date.empty()) info.meta_add("DATE", track.date.c_str());
 
+	// Readable by now-playing scripts: %source% and $info(spotify_uri).
+	info.meta_add("SOURCE", "Spotify");
+	if (!track.uri.empty()) info.info_set("spotify_uri", track.uri.c_str());
+
 	replaygain_info rg;
 	if (track.has_track_gain) rg.m_track_gain = static_cast<float>(track.track_gain_db);
 	if (track.has_track_peak) rg.m_track_peak = static_cast<float>(track.track_peak);

@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,7 +35,132 @@ void log_line(const char* text) {
 
 std::string json_quote(const std::string& value) { return flp::json::quote(value); }
 
-std::string make_track(const std::string& uri, int index = 0) {
+std::string make_track(const std::string& uri, int index = 0, int bitrate = 320);
+// v2 test state: revision and track count change through the test-only
+// "test_control" op, so tests can force a resync without restarting.
+struct v2_state_t {
+	std::mutex mutex;
+	std::string revision = "1";
+	int track_count = 3;
+} g_v2;
+
+std::string context_name(const std::string& uri) {
+	if (uri.rfind("spotify:album:", 0) == 0) return "Fake Album";
+	if (uri.rfind("spotify:user:", 0) == 0) return "Liked Songs";
+	if (uri.rfind("spotify:artist:", 0) == 0) return "Fake Artist";
+	return "Fake Playlist";
+}
+
+std::string make_item(const std::string& uri, const std::string& kind, const std::string& name,
+	const std::string& subtitle, const std::string& revision, long long trackCount) {
+	std::string out = "{";
+	out += "\"uri\":" + json_quote(uri);
+	out += ",\"kind\":" + json_quote(kind);
+	out += ",\"name\":" + json_quote(name);
+	out += ",\"subtitle\":" + json_quote(subtitle);
+	out += ",\"image_url\":null";
+	out += ",\"track_count\":" + std::to_string(trackCount);
+	out += ",\"revision\":";
+	out += revision.empty() ? "null" : json_quote(revision);
+	out += "}";
+	return out;
+}
+
+std::string make_track_ids(int count) {
+	std::string out = "[";
+	for (int i = 0; i < count; ++i) {
+		if (i != 0) out += ',';
+		out += make_track("", i);
+	}
+	out += "]";
+	return out;
+}
+
+std::string make_library() {
+	std::lock_guard<std::mutex> lock(g_v2.mutex);
+	const int count = g_v2.track_count;
+	const std::string revision = g_v2.revision;
+
+	std::string out = "{\"ok\":true,\"sections\":[";
+	out += "{\"id\":\"liked\",\"title\":\"Liked Songs\",\"items\":[" +
+		make_item("spotify:user:fake_user:collection", "collection", "Liked Songs", "", revision,
+			count) +
+		"]},";
+	out += "{\"id\":\"made_for_you\",\"title\":\"Made for you\",\"items\":[";
+	out += make_item("spotify:playlist:made000000000000000001", "playlist", "Daily Mix 1",
+		"Spotify", revision, count);
+	out += ",";
+	out += make_item("spotify:playlist:made000000000000000002", "playlist", "Discover Weekly",
+		"Spotify", revision, count);
+	out += "]},";
+	out += "{\"id\":\"playlists\",\"title\":\"Your playlists\",\"items\":[";
+	out += make_item("spotify:playlist:user000000000000000001", "playlist", "Road Trip",
+		"fake_user", revision, count);
+	out += "]},";
+	out += "{\"id\":\"albums\",\"title\":\"Albums\",\"items\":[";
+	out += make_item("spotify:album:alb0000000000000000001", "album", "Saved Album One",
+		"Fake Artist", revision, count);
+	out += ",";
+	out += make_item("spotify:album:alb0000000000000000002", "album", "Saved Album Two",
+		"Fake Artist", revision, count);
+	out += "]},";
+	out += "{\"id\":\"artists\",\"title\":\"Artists\",\"items\":[";
+	out += make_item("spotify:artist:art0000000000000000001", "artist", "Fake Artist", "",
+		"", count);
+	out += "]}";
+	out += "]}";
+	return out;
+}
+
+std::string make_search(const std::string& query, int limit) {
+	if (limit <= 0) limit = 20;
+	if (limit > 50) limit = 50;
+	std::lock_guard<std::mutex> lock(g_v2.mutex);
+	const std::string revision = g_v2.revision;
+
+	const int trackCount = limit < 2 ? limit : 2;
+	std::string out = "{\"ok\":true,\"tracks\":";
+	out += make_track_ids(trackCount);
+	out += ",\"albums\":[";
+	if (limit > 0) {
+		out += make_item("spotify:album:sea0000000000000000001", "album",
+			query + " Album", "Fake Artist", revision, g_v2.track_count);
+	}
+	out += "],\"artists\":[";
+	if (limit > 0) {
+		out += make_item("spotify:artist:sea0000000000000000001", "artist",
+			query + " Artist", "", "", g_v2.track_count);
+	}
+	out += "],\"playlists\":[";
+	if (limit > 0) {
+		out += make_item("spotify:playlist:sea0000000000000000001", "playlist",
+			query + " Playlist", "fake_user", revision, g_v2.track_count);
+	}
+	out += "]}";
+	return out;
+}
+
+std::string make_artist(const std::string& uri) {
+	std::lock_guard<std::mutex> lock(g_v2.mutex);
+	const std::string revision = g_v2.revision;
+	std::string out = "{\"ok\":true,\"artist\":";
+	out += make_item(uri, "artist", "Fake Artist", "", "", g_v2.track_count);
+	out += ",\"top_tracks\":" + make_track_ids(2);
+	out += ",\"albums\":[";
+	out += make_item("spotify:album:art0000000000000000001", "album", "Artist Album One",
+		"Fake Artist", revision, g_v2.track_count);
+	out += ",";
+	out += make_item("spotify:album:art0000000000000000002", "album", "Artist Album Two",
+		"Fake Artist", revision, g_v2.track_count);
+	out += "],\"singles\":[";
+	out += make_item("spotify:album:art0000000000000000003", "album", "Artist Single",
+		"Fake Artist", revision, g_v2.track_count);
+	out += "]}";
+	return out;
+}
+
+
+std::string make_track(const std::string& uri, int index, int bitrate) {
 	std::string trackUri = uri;
 	if (uri.rfind("spotify:track:", 0) != 0) {
 		char id[64];
@@ -55,7 +181,7 @@ std::string make_track(const std::string& uri, int index = 0) {
 	out += ",\"date\":\"2026\"";
 	out += ",\"duration_ms\":" + std::to_string(g_options.duration_ms);
 	out += ",\"codec\":\"vorbis\"";
-	out += ",\"bitrate\":320";
+	out += ",\"bitrate\":" + std::to_string(bitrate);
 	out += ",\"cover_url\":\"\"";
 	out += ",\"track_gain_db\":-7.25";
 	out += ",\"track_peak\":0.9";
@@ -160,19 +286,21 @@ void handle_connection(HANDLE pipe) {
 		return;
 	}
 
-	if (g_options.logged_out && (op == "info" || op == "resolve" || op == "open")) {
+	if (g_options.logged_out && (op == "info" || op == "resolve" || op == "open" ||
+		op == "library" || op == "search" || op == "artist")) {
 		write_line(pipe, error_reply("not_logged_in", "not logged in"));
 		return;
 	}
 
 	if (op == "info") {
+		const int bitrate = static_cast<int>(request.get_int64("bitrate", 320));
 		const flp::json::value* uris = request.find("uris");
 		std::string reply = "{\"ok\":true,\"tracks\":[";
 		if (uris != nullptr && uris->is_array()) {
 			for (size_t i = 0; i < uris->array.size(); ++i) {
 				if (i != 0) reply += ',';
 				reply += make_track(uris->array[i].is_string() ? uris->array[i].string : "",
-					static_cast<int>(i));
+					static_cast<int>(i), bitrate);
 			}
 		}
 		reply += "]}";
@@ -184,29 +312,75 @@ void handle_connection(HANDLE pipe) {
 		std::string reply = "{\"ok\":true,\"tracks\":[";
 		if (uri.rfind("spotify:track:", 0) == 0) {
 			reply += make_track(uri, 0);
+			reply += "]}";
 		} else {
-			for (int i = 0; i < 3; ++i) {
+			int count = 3;
+			std::string revision;
+			{
+				std::lock_guard<std::mutex> lock(g_v2.mutex);
+				count = g_v2.track_count;
+				revision = g_v2.revision;
+			}
+			for (int i = 0; i < count; ++i) {
 				if (i != 0) reply += ',';
 				reply += make_track("", i);
 			}
+			reply += "],\"context\":{";
+			reply += "\"uri\":" + json_quote(uri);
+			reply += ",\"name\":" + json_quote(context_name(uri));
+			reply += ",\"owner\":\"Fake Owner\"";
+			reply += ",\"image_url\":null";
+			reply += ",\"revision\":" + json_quote(revision);
+			reply += ",\"track_count\":" + std::to_string(count);
+			reply += "}}";
 		}
-		reply += "]}";
+		write_line(pipe, reply);
+		return;
+	}
+
+	if (op == "library") {
+		write_line(pipe, make_library());
+		return;
+	}
+
+	if (op == "search") {
+		const std::string query = request.get_string("query");
+		const int limit = static_cast<int>(request.get_int64("limit", 20));
+		write_line(pipe, make_search(query, limit));
+		return;
+	}
+
+	if (op == "artist") {
+		write_line(pipe, make_artist(uri));
+		return;
+	}
+
+	if (op == "test_control") {
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		if (request.has("revision")) g_v2.revision = request.get_string("revision");
+		if (request.has("tracks")) g_v2.track_count = static_cast<int>(request.get_int64("tracks"));
+		std::string reply = "{\"ok\":true,\"revision\":" + json_quote(g_v2.revision);
+		reply += ",\"tracks\":" + std::to_string(g_v2.track_count) + "}";
 		write_line(pipe, reply);
 		return;
 	}
 
 	if (op == "open") {
+		const int bitrate = static_cast<int>(request.get_int64("bitrate", 320));
 		const long long startMs = request.get_int64("start_ms", 0);
 		const long long startFrame = static_cast<long long>(
 			std::llround(static_cast<double>(startMs) * g_options.rate / 1000.0));
 		std::string header = "{\"ok\":true,\"track\":";
-		header += make_track(uri, 0);
+		header += make_track(uri, 0, bitrate);
 		header += ",\"sample_rate\":" + std::to_string(g_options.rate);
 		header += ",\"channels\":" + std::to_string(g_options.channels);
 		header += ",\"start_frame\":" + std::to_string(startFrame);
 		header += "}";
 		if (!write_line(pipe, header)) return;
 		stream_pcm(pipe, startFrame);
+		// Wait until the client has consumed the PCM before closing; closing a
+		// pipe with unread data discards the tail.
+		FlushFileBuffers(pipe);
 		return;
 	}
 
@@ -256,6 +430,14 @@ int wmain(int argc, wchar_t** argv) {
 			g_options.realtime = true;
 		} else if (arg == L"--logged-out") {
 			g_options.logged_out = true;
+		} else if (arg == L"--revision" && i + 1 < argc) {
+			const std::wstring value = argv[++i];
+			g_v2.revision.clear();
+			for (const wchar_t c : value) {
+				if (c < 128) g_v2.revision.push_back(static_cast<char>(c));
+			}
+		} else if (arg == L"--tracks" && i + 1 < argc) {
+			g_v2.track_count = _wtoi(argv[++i]);
 		} else if (arg == L"--quiet") {
 			g_options.quiet = true;
 		} else if (arg == L"--parent-pid" && i + 1 < argc) {

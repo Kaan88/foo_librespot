@@ -21,9 +21,13 @@ $ErrorActionPreference = "Stop"
 $componentDir = Split-Path -Parent $PSScriptRoot
 $probe = Join-Path $componentDir "build\tools\$Configuration\x64\bridge_probe.exe"
 $fake = Join-Path $componentDir "build\tools\$Configuration\x64\fake_bridge.exe"
-$metadataProbe = Join-Path $componentDir "build\tools\$Configuration\x64\metadata_probe.exe"
+# The metadata probe runs against the user's foobar2000 shared.dll. The
+# portable install is 32-bit, so use the Win32 probe there.
+$metadataProbe = Join-Path $componentDir "build\tools\$Configuration\Win32\metadata_probe.exe"
+$syncPlanTest = Join-Path $componentDir "build\tools\$Configuration\x64\sync_plan_test.exe"
 
 & (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration -WithTools
+& (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration -Platform Win32 -WithTools
 
 $failures = 0
 function Assert([bool]$condition, [string]$message) {
@@ -72,6 +76,35 @@ try {
 
     $r = Invoke-Probe @("--pipe", $normalPipe, "resolve", "spotify:album:4aawyAB9vmqN3uQ7FjRGTy")
     Assert ($r.Code -eq 0 -and $r.Output -match "resolve count=3") "resolve album into 3 tracks"
+    Assert ($r.Output -match "context uri=spotify:album:4aawyAB9vmqN3uQ7FjRGTy") "resolve carries album context"
+    Assert ($r.Output -match "context .*revision=1") "resolve context revision"
+
+    # --- protocol v2: library / search / artist / revision -----------------
+    $r = Invoke-Probe @("--pipe", $normalPipe, "library")
+    Assert ($r.Code -eq 0 -and $r.Output -match "library sections=5") "library has 5 sections"
+    Assert ($r.Output -match "section id=liked .*items=1") "liked section"
+    Assert ($r.Output -match "section id=made_for_you .*items=2") "made-for-you section"
+    Assert ($r.Output -match "kind=collection name=Liked Songs") "Liked Songs collection item"
+    Assert ($r.Output -match "kind=artist name=Fake Artist") "followed artist item"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "search", "nation of language", "--limit", "2")
+    Assert ($r.Code -eq 0 -and $r.Output -match "search tracks=2 albums=1 artists=1 playlists=1") `
+        "search returns every category"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "artist", "spotify:artist:art0000000000000000001")
+    Assert ($r.Code -eq 0 -and $r.Output -match "artist top_tracks=2 albums=2 singles=1") `
+        "artist page has top tracks, albums and singles"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "control", "--revision", "2", "--tracks", "4")
+    Assert ($r.Code -eq 0 -and $r.Output -match "control revision=2 tracks=4") "test control changes state"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "resolve", "spotify:playlist:user000000000000000001")
+    Assert ($r.Code -eq 0 -and $r.Output -match "resolve count=4") "revision change changes track count"
+    Assert ($r.Output -match "context .*revision=2 .*track_count=4") "new context revision"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "info", "--bitrate", "96",
+        "spotify:track:0123456789abcdefghijkl")
+    Assert ($r.Code -eq 0 -and $r.Output -match "bitrate=96") "info reports the preferred bitrate"
 
     $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:0123456789abcdefghijkl",
         "--frames", "all", "--start-ms", "0", "--expect-start-frame", "0", "--expect-frames", "88200")
@@ -124,10 +157,16 @@ try {
         $metadataCode = $LASTEXITCODE
         Write-Host $metadataOutput.Trim()
         Assert ($metadataCode -eq 0 -and $metadataOutput -notmatch "FAIL") `
-            "metadata mapping (title/artist/album/track/disc/date/codec/bitrate/ReplayGain)"
+            "metadata mapping (title/artist/album/track/disc/date/codec/bitrate/ReplayGain/SOURCE)"
     } else {
         Write-Host "SKIP  metadata mapping test (shared.dll not found under $Foobar2000Dir)"
     }
+
+    # --- sync plan (pure functions, no host) --------------------------------
+    $syncOutput = & $syncPlanTest 2>&1 | Out-String
+    $syncCode = $LASTEXITCODE
+    Assert ($syncCode -eq 0 -and $syncOutput -match "All sync plan tests passed") `
+        "sync plan (insert/remove/reorder/duplicates/protected playing item)"
 
     # --- process spawn -----------------------------------------------------
     $spawnDir = Join-Path $env:TEMP "foo_librespot_spawn_test"
@@ -159,6 +198,12 @@ try {
             $r = Invoke-Probe @("--pipe", $pythonPipe, "play", "spotify:track:0123456789abcdefghijkl",
                 "--frames", "all", "--expect-frames", "44100")
             Assert ($r.Code -eq 0 -and $r.Output -match "peak=0.250000") "python fake bridge PCM"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "library")
+            Assert ($r.Code -eq 0 -and $r.Output -match "library sections=5" `
+                -and $r.Output -match "kind=collection") "python fake bridge library"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "resolve", "spotify:playlist:py0000000000000000001")
+            Assert ($r.Code -eq 0 -and $r.Output -match "context .*revision=1") `
+                "python fake bridge resolve context"
         } else {
             Write-Host "SKIP  python fake bridge (pywin32 not installed)"
         }

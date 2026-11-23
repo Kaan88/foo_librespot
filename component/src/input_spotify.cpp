@@ -33,8 +33,8 @@ public:
 
 		try {
 			flp::bridge_client client;
-			const std::vector<flp::track_info> tracks =
-				client.info({m_path}, flp::make_cancel(aborter));
+			const std::vector<flp::track_info> tracks = client.info({m_path},
+				flp::make_cancel(aborter), 5000, 60000, flp::effective_bitrate_kbps());
 			if (tracks.empty()) throw exception_io_data("Spotify: track not found");
 			m_track = tracks.front();
 			if (m_track.uri.empty()) m_track.uri = m_path;
@@ -122,9 +122,14 @@ public:
 	bool decode_can_seek() { return true; }
 
 	bool decode_get_dynamic_info(file_info& p_out, double& p_timestamp_delta) {
-		(void)p_out;
-		(void)p_timestamp_delta;
-		return false;
+		// The exact bitrate of the file open picked is in the open header; report
+		// it once, after playback starts, so the now-playing display is accurate
+		// even when the pre-playback `info` estimate differed.
+		if (m_pending_bitrate <= 0) return false;
+		p_out.info_set_bitrate(m_pending_bitrate);
+		m_pending_bitrate = 0;
+		p_timestamp_delta = 0.0;
+		return true;
 	}
 
 	bool decode_get_dynamic_info_track(file_info& p_out, double& p_timestamp_delta) {
@@ -167,6 +172,7 @@ private:
 				m_track = opened.track;
 				m_have_track = true;
 			}
+			m_pending_bitrate = opened.track.bitrate > 0 ? opened.track.bitrate : 0;
 			m_eof = false;
 			m_pcmBytes.clear();
 		} catch (const flp::cancelled&) {
@@ -179,6 +185,7 @@ private:
 	std::string m_path;
 	flp::track_info m_track;
 	bool m_have_track = false;
+	int m_pending_bitrate = 0;
 
 	std::unique_ptr<flp::pipe_stream> m_stream;
 	unsigned m_sample_rate = 44100;
