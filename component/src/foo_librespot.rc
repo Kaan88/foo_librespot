@@ -13,7 +13,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 // Dialog
 //
 
-IDD_PREFERENCES DIALOGEX 0, 0, 320, 146
+IDD_PREFERENCES DIALOGEX 0, 0, 320, 186
 STYLE DS_SETFONT | WS_CHILD
 FONT 8, "Microsoft Sans Serif", 400, 0, 0x0
 BEGIN
@@ -27,8 +27,12 @@ BEGIN
     COMBOBOX        IDC_SYNC,82,90,140,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Playlist name prefix:",IDC_STATIC,10,112,68,8
     EDITTEXT        IDC_PREFIX,82,110,220,14,ES_AUTOHSCROLL
+    LTEXT           "Audio cache size:",IDC_STATIC,10,132,68,8
+    COMBOBOX        IDC_CACHE,82,130,110,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Clear cache",IDC_CACHE_CLEAR,198,130,60,14
+    LTEXT           "",IDC_CACHE_INFO,82,148,228,10
     LTEXT           "Playlists linked to Spotify are named <prefix><name>; 0 minutes disables the timer.",
-                    IDC_STATIC,10,130,300,10
+                    IDC_STATIC,10,166,300,10
 END
 
 IDD_ADD_LINK DIALOGEX 0, 0, 360, 208

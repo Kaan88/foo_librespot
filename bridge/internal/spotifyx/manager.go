@@ -14,6 +14,8 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/ap"
 	"github.com/devgianlu/go-librespot/apresolve"
+	"github.com/devgianlu/go-librespot/audio"
+	"github.com/devgianlu/go-librespot/cache"
 	"github.com/devgianlu/go-librespot/player"
 	devicespb "github.com/devgianlu/go-librespot/proto/spotify/connectstate/devices"
 	"github.com/devgianlu/go-librespot/session"
@@ -66,6 +68,11 @@ type Status struct {
 	// Country is the account country reported by the accesspoint; empty until
 	// a session exists.
 	Country string
+	// Product is the account product type from the accesspoint ("premium",
+	// "free", ...); empty until known.
+	Product string
+	// LastErrorCode is the protocol error code classifying LastError, if any.
+	LastErrorCode string
 }
 
 // ConnectError is a session that could not be created. It is reported to
@@ -127,6 +134,12 @@ type Manager struct {
 	kick        chan struct{}
 	invalidate  chan struct{}
 	lastCC      atomic.Value // string
+	product     atomic.Value // string: account product type ("premium", "free", ...)
+	cacheHits   atomic.Int64 // streams served from the audio cache
+	cacheDir    string
+	cacheMB     int
+	audioCache  *cache.Cache
+	lastErrCode string
 	openSession sessionOpener
 
 	// streamMu serialises player.NewStream: its CDN quarantine map is not
@@ -232,7 +245,18 @@ func (m *Manager) Status() Status {
 		LastError: m.lastErr,
 		Username:  m.user,
 		Country:   m.Country(),
+
+		Product:       m.Product(),
+		LastErrorCode: m.lastErrCode,
 	}
+}
+
+// Product is the account's product type, or "" until the accesspoint said.
+func (m *Manager) Product() string {
+	if v, ok := m.product.Load().(string); ok {
+		return v
+	}
+	return ""
 }
 
 // Country is the account's country code, or "" until the accesspoint said.
@@ -343,6 +367,7 @@ func (m *Manager) finishAttempt(a *attempt, env *Env, user string, err error) {
 		}
 		m.state = StateConnected
 		m.lastErr = ""
+		m.lastErrCode = ""
 		m.lastFailure = nil
 	} else {
 		if failure == nil {
@@ -350,6 +375,10 @@ func (m *Manager) finishAttempt(a *attempt, env *Env, user string, err error) {
 		}
 		m.state = StateError
 		m.lastErr = failure.Error()
+		m.lastErrCode = ""
+		if coded := Classify(failure, m.Country(), m.Product()); coded != nil {
+			m.lastErrCode = coded.Code
+		}
 		m.lastFailure = failure
 	}
 	m.mu.Unlock()
@@ -438,7 +467,22 @@ func (m *Manager) wait(ctx context.Context) (*Env, error) {
 
 // Do runs fn with the current session and, when fn fails with something that
 // looks like a dead session, recreates it once and retries.
+//
+// Failures that map to a specific protocol code (Premium needed, rate limited,
+// region, unavailable track) come back as *CodedError.
 func (m *Manager) Do(ctx context.Context, fn func(*Env) error) error {
+	err := m.do(ctx, fn)
+	if err == nil {
+		return nil
+	}
+	if coded := Classify(err, m.Country(), m.Product()); coded != nil {
+		m.log.Debugf("classified %q as %s", err.Error(), coded.Code)
+		return coded
+	}
+	return err
+}
+
+func (m *Manager) do(ctx context.Context, fn func(*Env) error) error {
 	env, err := m.wait(ctx)
 	if err != nil {
 		return err
@@ -496,6 +540,18 @@ func IsPermanent(err error) bool {
 		return true
 	}
 	if errors.Is(err, ErrNotLoggedIn) {
+		return true
+	}
+	var coded *CodedError
+	if errors.As(err, &coded) {
+		return true
+	}
+	var limited *spclient.RateLimitedError
+	if errors.As(err, &limited) {
+		return true
+	}
+	var keyErr *audio.KeyProviderError
+	if errors.As(err, &keyErr) {
 		return true
 	}
 	if IsUnsupported(err) || IsBadInput(err) {
@@ -583,14 +639,7 @@ func (m *Manager) openSessionFromSpotify(ctx context.Context, c *creds.Credentia
 			continue
 		}
 
-		p, err := player.NewPlayer(&player.Options{
-			Spclient:             sess.Spclient(),
-			AudioKey:             sess.AudioKey(),
-			Events:               sess.Events(),
-			Log:                  m.log,
-			CountryCode:          m.Country,
-			NormalisationEnabled: false,
-		})
+		p, err := m.newPlayer(sess)
 		if err != nil {
 			sess.Close()
 			return nil, "", fmt.Errorf("creating player: %w", err)
@@ -601,6 +650,7 @@ func (m *Manager) openSessionFromSpotify(ctx context.Context, c *creds.Credentia
 		// alternative-track relinking. Keep draining so a reconnect's packet
 		// cannot block the reader.
 		go m.trackCountry(sess)
+		go m.trackProduct(sess)
 
 		m.log.Infof("Spotify session created in %s (username %s)",
 			time.Since(start).Round(time.Millisecond), sess.Username())

@@ -6,11 +6,13 @@ namespace {
 // Identifies our setting inside the component configuration store.
 const GUID guid_cfg_bitrate_kbps = { 0x6b0b1a4e, 0x9c31, 0x4c1e, { 0xa7, 0x2d, 0x51, 0x2f, 0x0b, 0xe3, 0x9a, 0x71 } };
 const GUID guid_cfg_sync_interval = { 0x2f7c4a91, 0x8b6d, 0x4e02, { 0xa3, 0x5f, 0x7c, 0x18, 0x44, 0x9d, 0xb2, 0x60 } };
+const GUID guid_cfg_cache_mb = { 0x5c1a8e27, 0x40d3, 0x4b9a, { 0x8f, 0x16, 0xd2, 0x73, 0x0a, 0xe9, 0x6b, 0x54 } };
 const GUID guid_cfg_playlist_prefix = { 0x9d4e7b13, 0x3a52, 0x4c8f, { 0xb1, 0x67, 0x0e, 0x9a, 0xd5, 0x24, 0x7c, 0x38 } };
 } // namespace
 
 cfg_uint cfg_bitrate_kbps(guid_cfg_bitrate_kbps, kDefaultBitrateKbps);
 cfg_uint cfg_sync_interval_minutes(guid_cfg_sync_interval, kDefaultSyncIntervalMinutes);
+cfg_uint cfg_cache_mb(guid_cfg_cache_mb, kDefaultCacheMb);
 cfg_string cfg_playlist_prefix(guid_cfg_playlist_prefix, kDefaultPlaylistPrefix);
 
 bool is_valid_bitrate(int kbps) { return kbps == 96 || kbps == 160 || kbps == 320; }
@@ -18,6 +20,13 @@ bool is_valid_bitrate(int kbps) { return kbps == 96 || kbps == 160 || kbps == 32
 int effective_bitrate_kbps() {
 	const int value = static_cast<int>(cfg_bitrate_kbps.get());
 	return is_valid_bitrate(value) ? value : kDefaultBitrateKbps;
+}
+
+int effective_cache_mb() {
+	const long long value = cfg_cache_mb.get();
+	if (value < 0) return kDefaultCacheMb;
+	if (value > kMaxCacheMb) return kMaxCacheMb;
+	return static_cast<int>(value);
 }
 
 int effective_sync_interval_minutes() {

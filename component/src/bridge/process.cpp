@@ -86,6 +86,11 @@ bridge_process& bridge_process::instance() {
 	return object;
 }
 
+void bridge_process::set_cache_mb(int cache_mb) {
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_cache_mb = cache_mb;
+}
+
 void bridge_process::set_exe_path(std::wstring exe_path) {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_exe = std::move(exe_path);
@@ -155,6 +160,7 @@ bool bridge_process::spawn_locked(std::string& error, bool new_console) {
 	} else {
 		cmd += L" --parent-pid " + std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId()));
 		cmd += L" --pipe " + m_pipe_name;
+		if (m_cache_mb >= 0) cmd += L" --cache-mb " + std::to_wstring(m_cache_mb);
 	}
 
 	std::vector<wchar_t> cmdBuffer(cmd.begin(), cmd.end());

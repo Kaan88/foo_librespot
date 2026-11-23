@@ -29,6 +29,11 @@ public:
 	void set_exe_path(std::wstring exe_path);
 	std::wstring exe_path() const;
 
+	// Audio cache limit in MiB passed to a spawned bridge as --cache-mb
+	// (0 = off). Negative (the default) passes no flag: the bridge's own
+	// default (off) applies.
+	void set_cache_mb(int cache_mb);
+
 	// True when a server accepts connections on our pipe right now. This is
 	// the readiness test: it never sends a request, so it cannot block behind
 	// session creation.
@@ -61,6 +66,7 @@ private:
 	std::wstring m_exe;
 	std::intptr_t m_process = 0;
 	unsigned long m_exit_code = 0;
+	int m_cache_mb = -1;
 };
 
 std::string utf8_from_wide(const std::wstring& text);

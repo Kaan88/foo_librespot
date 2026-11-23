@@ -14,7 +14,7 @@ Process: `librespot-bridge.exe --parent-pid <pid> --pipe <name>`
   with status 0; the test is pipe connectability, not a request round trip.
   Transport: Windows named pipe `\.\pipe\<name>` (default name `foo_librespot`), byte mode, many concurrent instances.
 Each request is ONE connection: client writes one JSON line (UTF-8, `\n`-terminated), server answers with one JSON line.
-Errors: `{"ok":false,"error":"<message>","code":"<not_logged_in|unavailable|bad_request|internal>"}`.
+Errors: `{"ok":false,"error":"<message>","code":"<not_logged_in|unavailable|bad_request|internal>"}`; v4 adds `premium_required`, `rate_limited`, `region_unavailable` and `track_unavailable` (see "v4 additions").
 - `not_logged_in`: no credentials file; the user has to run login.
 - `unavailable`: the Spotify session is not usable (connecting failed, track
   restricted, unplayable format). A failed creation reports
@@ -139,3 +139,55 @@ Clients use them for "Open album" / "Open artist".
 
 ### Errors
 If Spotify rejects a write from this kind of login, answer `{"ok":false,"code":"unsupported","error":"<what Spotify said>"}`, never a fake success.
+
+## v4 additions (Phase 5: audio cache, specific errors, album ReplayGain)
+
+All earlier requests and fields stay as they are; everything below is additive. A v3 client keeps working against a v4 bridge, and a v4 client must treat an unknown-op error from `config` as "old bridge".
+
+### Audio cache (`--cache-mb` flag and `config` op)
+
+go-librespot's audio cache stores the **encrypted** audio files as the CDN serves them (the audio key is still fetched for every playback, so a cached file is useless without a valid login), keyed by Spotify file id, with least-recently-used eviction once the size limit is reached. The bridge keeps it in `%LOCALAPPDATA%\foo_librespot\cache\audio` (override: `--cache-dir <dir>`; the library adds the `audio` subfolder).
+
+- Spawn flag: `librespot-bridge.exe ... --cache-mb <N>`: limit in MiB, `0` = off. When the flag is missing the cache is **off**, so old components never create one. The component passes its setting on every spawn.
+- A file is written once it has been downloaded completely (a track that is skipped half way is not cached). The first open of a track is unchanged; a later open reads the file from disk and skips the CDN download and the storage-resolve round trip.
+- `open` headers gain an optional `"from_cache":true` (omitted when the audio came from the network).
+
+`config` (change settings of a running bridge: no restart, no reconnect):
+
+`{"op":"config","cache_mb":1024,"clear_cache":true}` -> `{"ok":true,"cache_mb":1024,"cache_dir":"C:\\Users\\...\\foo_librespot\\cache","cache_bytes":9177336}`
+
+- `cache_mb` (optional, int 0..1048576): sets the limit; `0` turns the cache off. Takes effect for the next `open`; streams that are already running are not touched. The bridge replaces its stream factory in place; the Spotify session stays up.
+- `clear_cache` (optional, bool): deletes every cached file (done after `cache_mb` when both are given). Files of a stream that is playing right now cannot be deleted on Windows; the reply is then `internal` with a message saying so, and everything else is deleted anyway.
+- With neither field the request only reports the state. `cache_bytes` is the size of the cached audio on disk.
+- `bad_request` for a `cache_mb` out of range. A bridge older than v4 answers `bad_request` ("unknown op").
+
+`status` gains two optional fields: `"product":"premium"` (account product type from the accesspoint's product-info packet; absent until known) and `"last_error_code":"premium_required"` (the error code that classifies `last_error`, when one applies).
+
+### Error codes
+
+The `code` of an error reply can now also be one of:
+
+| code | meaning | extra |
+| --- | --- | --- |
+| `premium_required` | The account is not Premium, or Premium has expired. Sources: the accesspoint refusing the login with `PremiumAccountRequired`; or, for an account whose product type (product-info packet) is not `premium`, a refused audio key, a missing audio file or a 401/403 from the CDN. | |
+| `rate_limited` | Spotify answered HTTP 429 (from any endpoint). | optional `"retry_after":<seconds>` in the reply when Spotify said so (a connect-state 429 carries the `Retry-After` header; the audio and metadata endpoints do not, then the field is absent). |
+| `region_unavailable` | The track is restricted in the account's country and relinking found no playable alternative (`media is restricted`). | |
+| `track_unavailable` | The track is removed or has no playable audio file: metadata 404/410, no supported format, a refused audio key or a 403 for a Premium account. | |
+| `not_logged_in` | As before, and now also when Spotify rejects the saved login (`BadCredentials`, `CouldNotValidateCredentials`). | |
+
+`unavailable` stays for a session that cannot be established (`connecting to Spotify failed: <reason>`) and for anything else; `internal` for the rest. The `error` text is a message fit for showing to the user. Any request can return these codes (`open` and `info` most often). A client that does not know a code must handle it like `unavailable`.
+
+### Album ReplayGain
+
+`<track_info>.album_gain_db` / `album_peak` were defined in v1 and are now documented as filled: Spotify's AUDIO_FILES extended metadata carries `default_album_normalization_params` next to `default_file_normalization_params`, both `{loudness_db, true_peak_db}`. The same formula applies to both, relative to the ReplayGain 2.0 reference of -18 LUFS:
+
+```
+track_gain_db = -18 - default_file_normalization_params.loudness_db
+track_peak    = 10 ^ (default_file_normalization_params.true_peak_db / 20)
+album_gain_db = -18 - default_album_normalization_params.loudness_db
+album_peak    = 10 ^ (default_album_normalization_params.true_peak_db / 20)
+```
+
+Album values are `null` only when Spotify sends no album params for the file. They are present in `info`, `resolve` and in the `open` header's `track` (which describes the file that actually plays, and can differ from `info` after relinking). Clients should use the `open` header's values for ReplayGain during playback.
+
+The ogg file header carries its own track/album gain and peak, but with a reference level 1 dB higher than the AUDIO_FILES-derived values above, and for singles it can repeat the track values as the album values. AUDIO_FILES is the source used.

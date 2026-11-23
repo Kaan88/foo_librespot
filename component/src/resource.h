@@ -12,3 +12,6 @@
 #define IDC_LINKS       1006
 #define IDC_SYNC        1007
 #define IDC_PREFIX      1008
+#define IDC_CACHE       1009
+#define IDC_CACHE_CLEAR 1010
+#define IDC_CACHE_INFO  1011

@@ -159,6 +159,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.playlistAdd(ctx, conn, &req)
 	case "radio":
 		s.radio(ctx, conn, &req)
+	case "config":
+		s.config(conn, &req)
 	default:
 		s.writeError(conn, badRequest(fmt.Sprintf("unknown op %q", req.Op)))
 	}
@@ -177,7 +179,33 @@ func (s *Server) status(ctx context.Context, conn net.Conn) {
 		State:     st.State,
 		LastError: st.LastError,
 		Version:   Version,
+
+		Product:       st.Product,
+		LastErrorCode: st.LastErrorCode,
 	})
+}
+
+// config applies settings that can change while the bridge runs and reports
+// the cache state. With no fields it only reports.
+func (s *Server) config(conn net.Conn, req *request) {
+	if req.CacheMB != nil {
+		if *req.CacheMB < 0 || *req.CacheMB > 1<<20 {
+			s.writeError(conn, badRequest("cache_mb must be between 0 and 1048576"))
+			return
+		}
+		if err := s.mgr.ConfigureCache(*req.CacheMB); err != nil {
+			s.writeError(conn, err)
+			return
+		}
+	}
+	if req.ClearCache {
+		if err := s.mgr.ClearCache(); err != nil {
+			s.writeError(conn, err)
+			return
+		}
+	}
+	info := s.mgr.CacheSettings()
+	s.writeJSON(conn, configResponse{OK: true, CacheMB: info.MB, CacheDir: info.Dir, CacheBytes: info.Bytes})
 }
 
 func (s *Server) resolve(ctx context.Context, conn net.Conn, req *request) {
@@ -371,6 +399,7 @@ func (s *Server) open(ctx context.Context, conn net.Conn, req *request) {
 		SampleRate: result.SampleRate,
 		Channels:   channels,
 		StartFrame: result.StartFrame,
+		FromCache:  result.FromCache,
 	}); err != nil {
 		return
 	}
@@ -448,7 +477,12 @@ func (s *Server) writeJSON(w io.Writer, v any) error {
 func (s *Server) writeError(w io.Writer, err error) {
 	code := codeFor(err)
 	s.log.Debugf("error (%s): %v", code, err)
-	_ = s.writeJSON(w, errorResponse{OK: false, Error: err.Error(), Code: code})
+	resp := errorResponse{OK: false, Error: err.Error(), Code: code}
+	var ce *spotifyx.CodedError
+	if errors.As(err, &ce) {
+		resp.RetryAfter = ce.RetryAfter
+	}
+	_ = s.writeJSON(w, resp)
 }
 
 // readLine reads one newline-terminated line of at most max bytes.

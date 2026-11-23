@@ -216,6 +216,38 @@ import path.
 - Bridge replies `not_logged_in`: the input throws
   `Spotify: not logged in — Preferences > Tools > foo_librespot` and details go
   to the foobar2000 console.
+- Specific failures (protocol v4, `src/error_policy.cpp`, unit-tested in
+  `tools/sync_plan_test`): `premium_required`, `rate_limited` (with the
+  retry-after seconds when known), `region_unavailable`, `track_unavailable`.
+  Playing a track that fails prints one console line per track
+  (`foo_librespot: <spotify:track:...>: <message> (code: ...)`) and raises a
+  short popup **once per kind and session**, so a playlist of unavailable
+  tracks does not raise a dialog per track. `track_unavailable` and
+  `region_unavailable` (and a track `info` reports as not playable) are thrown
+  as `exception_io_not_found`, the per-item failure foobar2000 handles by moving
+  on to the next playlist item; the other kinds (login, Premium, rate limit,
+  connection) throw `exception_io_denied` because they are not about one track.
+  Old bridges' generic `unavailable` / `internal` replies keep showing the
+  bridge's message as before.
+
+## Audio cache
+
+Preferences > Tools > foo_librespot: **Audio cache size** (Off, 256 MB, 512 MB,
+1 GB (default), 2 GB, 5 GB, 10 GB) and **Clear cache**, with the amount cached
+shown next to it. The files are the encrypted audio from Spotify's CDN in
+`%LOCALAPPDATA%\foo_librespot\cache`. The setting is passed to a starting
+bridge as `--cache-mb N`; when Apply is pressed while the bridge is already
+running it is applied live through the `config` op (no restart, playback is
+not interrupted). Clear cache goes through the running bridge, or deletes the
+folder directly when none runs. A track is cached once it has been played to the
+end of its download; skipping half way caches nothing.
+
+## ReplayGain
+
+Track and album gain/peak come from Spotify's loudness data (`-18 - loudness`,
+see `proto/PROTOCOL.md`). If `info` could not tell the album values, or the
+playing file's values differ (relinking), the `open` header's values are handed
+to foobar2000 as dynamic info once playback starts, so album gain mode follows.
 
 ## Layout
 
