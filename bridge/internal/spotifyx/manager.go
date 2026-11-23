@@ -132,6 +132,17 @@ type Manager struct {
 	// streamMu serialises player.NewStream: its CDN quarantine map is not
 	// concurrency safe.
 	streamMu sync.Mutex
+
+	// Metadata caches. Everything stored is immutable once built, so values
+	// can be shared between requests.
+	trackMeta   *lru[string, *trackMeta]
+	trackInfos  *lru[trackInfoKey, TrackInfo]
+	items       *lru[string, Item]
+	artistPages *ttlLRU[string, *ArtistPage]
+
+	libMu       sync.Mutex
+	libSections []Section
+	libAt       time.Time
 }
 
 // NewManager returns a manager bound to ctx. Nothing is created until Start
@@ -145,6 +156,11 @@ func NewManager(ctx context.Context, log *logging.Logger) *Manager {
 		state:      StateConnecting,
 		kick:       make(chan struct{}, 1),
 		invalidate: make(chan struct{}),
+
+		trackMeta:   newLRU[string, *trackMeta](20000),
+		trackInfos:  newLRU[trackInfoKey, TrackInfo](20000),
+		items:       newLRU[string, Item](5000),
+		artistPages: newTTLLRU[string, *ArtistPage](artistCacheSize, artistCacheTTL),
 	}
 	m.openSession = m.openSessionFromSpotify
 	return m
@@ -482,11 +498,28 @@ func IsPermanent(err error) bool {
 	if errors.Is(err, ErrNotLoggedIn) {
 		return true
 	}
+	if IsUnsupported(err) {
+		return true
+	}
 	var cre *spclient.ContextResolveError
 	if errors.As(err, &cre) && cre.IsAccessDenied() {
 		return true
 	}
+	// A 4xx from the backend is the backend's final answer (a missing playlist,
+	// a refused collection set); recreating the session would not change it.
+	var statusErr *spclient.StatusError
+	if errors.As(err, &statusErr) && isClientStatus(statusErr.StatusCode) {
+		return true
+	}
+	var httpErr *librespot.HTTPStatusError
+	if errors.As(err, &httpErr) && isClientStatus(httpErr.StatusCode) {
+		return true
+	}
 	return false
+}
+
+func isClientStatus(status int) bool {
+	return status >= 400 && status < 500
 }
 
 // reset closes the given generation so the connector builds the next one.

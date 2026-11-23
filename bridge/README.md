@@ -12,7 +12,7 @@ implemented by `bin/librespot-bridge.exe`.
 ```
 bridge/
   cmd/bridge/            librespot-bridge.exe (pipe server, `login`)
-  cmd/bridgectl/         bridgectl.exe (status/resolve/info/open-to-wav client)
+  cmd/bridgectl/         bridgectl.exe (status/resolve/info/library/search/artist/open-to-wav client)
   cmd/spike/             Phase 0 tool: `login`, `dump <track> <out.wav>`
   internal/bridge/       protocol types, named-pipe server, streaming loop
   internal/spotifyx/     shared session, country, metadata, resolve, sample-exact open
@@ -87,9 +87,10 @@ librespot-bridge.exe login
 
 One request per connection: one JSON line in, one JSON line out. `open` keeps
 the connection and follows the header with raw little-endian float32 PCM until
-the end of the track, then closes. Ops: `status`, `resolve`, `info`, `open`.
-Errors carry `code` ∈ `not_logged_in | unavailable | bad_request | internal`.
-See `../proto/PROTOCOL.md` for the exact shapes.
+the end of the track, then closes. Ops: `status`, `resolve`, `info`, `open`,
+plus the Phase 3 `library`, `search` and `artist`. Errors carry `code` ∈
+`not_logged_in | unavailable | bad_request | internal | unsupported`. See
+`../proto/PROTOCOL.md` for the exact shapes.
 
 `status` answers immediately from cached state (it never waits for the
 session), so a client can always ask what is going on. A request that needs the
@@ -97,7 +98,9 @@ session waits for the in-flight creation — bounded by its own timeout — and
 fails with `unavailable` and `connecting to Spotify failed: <reason>` when that
 creation fails. A request that fails with a session/connection error is retried
 once after the session is recreated; definitive answers (restricted or
-unplayable track, refused context, bad input) are returned as-is.
+unplayable track, refused context or collection, missing artist, bad input) are
+returned as-is, and a feature this session cannot serve answers
+`code: "unsupported"`.
 
 ### The shared session
 
@@ -148,6 +151,58 @@ lists every item — including Spotify's generated playlists such as Daily Mixes
 as playback gets there. `info` preserves the request order; an unknown track
 yields an unplayable entry with empty fields.
 
+`info` takes an optional `bitrate` (96/160/320) and describes the file `open`
+would pick for it, so a client can show codec and bitrate before playing.
+
+Metadata is cached in memory (LRU): the raw `TRACK_V4`/`AUDIO_FILES` metadata
+and the built `track_info` for 20 000 URIs (per preferred bitrate), album and
+artist items by URI, and artist pages for 5 minutes. A playlist opened twice
+fetches nothing the second time; a 500-track `info` after its `resolve` takes
+milliseconds.
+
+### Resolve context
+
+`resolve` also returns, for album and playlist contexts (and for Liked Songs),
+the `context` object: `uri`, `name`, `owner`, `image_url`, `revision` and
+`track_count`. For playlists the revision is the playlist service's revision
+(`metadata["playlist.revision"]`, hex); Spotify-generated playlists report an
+all-zero prefix but a real content revision. Albums and Liked Songs have no
+service revision, so theirs is a truncated SHA-256 of the ordered track-URI
+list, which changes exactly when the contents do.
+
+### Library, search and artist
+
+Everything below comes from the session's own APIs; no Web API token is
+involved.
+
+- `library` reads the playlist service's decorated rootlist
+  (`/playlist/v2/user/<u>/rootlist`, one request) for the user's playlists and
+  the Spotify-owned "made for you" playlists, and the collection service's
+  `collection` set for Liked Songs and saved albums plus the `artist` set for
+  followed artists. Album and artist names, covers and portraits come from
+  batched `ALBUM_V4`/`ARTIST_V4` extended metadata. The four sources are fetched
+  in parallel; the reply is cached for 30 s, so reopening the tab is instant.
+- `search` asks the context resolver for `spotify:search:<query>`, which is
+  Spotify's internal search list: up to 20 tracks. No album, artist or playlist
+  search endpoint is reachable from a go-librespot session (the mercury
+  `searchview` routes answer 404 and `api.spotify.com` answers 429 for the
+  login5 token), so the reply's `albums` and `artists` are the albums and
+  artists of those matching tracks, limited to the request's limit, and
+  `playlists` is empty. They are real entities, not placeholders, but they are
+  derived from the track results rather than being a category search of their
+  own.
+- `artist` reads `ARTIST_V4` (top tracks for the account's country, album
+  groups, single groups) and resolves the release names and covers with batched
+  `ALBUM_V4`.
+
+### Item images
+
+Covers and portraits are the largest `i.scdn.co` image of the metadata. A
+rootlist playlist uses its `image_url` format attribute when Spotify provides
+one (generated/editorial playlists) and otherwise its own picture
+(`u.scdn.co/images/pl/default/<hex>`); a user playlist without either has
+`"image_url": null`.
+
 ### Sample-accurate seeking
 
 foobar2000 seeks by closing the connection and sending `open` with a new
@@ -183,7 +238,10 @@ the rounding and the stale-granule handling.
 ```text
 bridgectl [--pipe <name>] status
 bridgectl [--pipe <name>] resolve <uri-or-url>
-bridgectl [--pipe <name>] info <uri-or-url>...
+bridgectl [--pipe <name>] info <uri-or-url>... [--bitrate 96|160|320]
+bridgectl [--pipe <name>] library
+bridgectl [--pipe <name>] search <query> [--limit N]
+bridgectl [--pipe <name>] artist <uri-or-url>
 bridgectl [--pipe <name>] open-to-wav <uri> <out.wav>
           [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 ```
@@ -206,7 +264,7 @@ spike.exe dump <spotify:track:ID | open.spotify.com/track/ID | ID> <out.wav>
 
 Against the logged-in Premium account (`%APPDATA%\foo_librespot\credentials.json`):
 
-- `status` → `{"ok":true,"logged_in":true,"username":"testuser0001","country":"SE","version":"0.1.0"}`.
+- `status` → `{"ok":true,"logged_in":true,"username":"testuser0001","country":"SE","version":"0.2.0"}`.
 - `resolve https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj` → 14 tracks with
   covers and gains; Liked Songs → 377 tracks; `info` with all 377 URIs in one
   request (4 batches) returned 377 entries in order, all with `cover_url` and
@@ -226,6 +284,24 @@ Against the logged-in Premium account (`%APPDATA%\foo_librespot\credentials.json
   `{"ok":false,"code":"not_logged_in"}`; clients closing mid-stream stop the
   bridge's decoder promptly; 5 concurrent `info` requests succeed while a
   stream is being written.
+
+Phase 3, measured on the same account:
+
+- `library` → liked 1, made for you 8, playlists 25, albums 28, artists 5 in
+  520–543 ms cold (four sources in parallel plus two metadata batches), 16 ms
+  from the 30 s cache.
+- `search "nation of language" --limit 5` → 5 tracks, 5 albums, 5 artists, 0
+  playlists; the top track is Nation of Language's "Weak In Your Light"
+  (`vorbis 320`). With limit 20: 20 tracks, 16 albums, 11 artists in ~800 ms.
+- `artist spotify:artist:5JWBow4ywgKNQ5HBxY8hcz` → Nation of Language, 10 top
+  tracks, 4 albums, 34 singles in 550–570 ms; 13 ms from the page cache.
+- `resolve https://open.spotify.com/playlist/37i9dQZF1E8M5Z6GDxnHFg` → 50
+  tracks, context "On Division St Radio" / owner `spotify` / a pickasso image /
+  revision `00000000c276921a…` / count 50; a second resolve returned the same
+  revision. A 972-item playlist resolved to 961 tracks in ~3.1 s, and `info`
+  for 500 of them then took 29 ms.
+- `info spotify:track:4odb2UIgc0u22MNV7p4iQq --bitrate 320` → `vorbis` /
+  `320`; with `--bitrate 96` → `vorbis` / `96`.
 
 ## Notes and limits
 

@@ -109,7 +109,7 @@ func (m *Manager) openOnce(ctx context.Context, env *Env, ref spotifyuri.Ref, id
 	// beginning, but the client asked for a finished track.
 	if duration := int64(st.Media.Duration()); duration > 0 && startMs >= duration {
 		closeSource(st.Source)
-		infos, err := m.infoWithoutStream(ctx, env, ref)
+		infos, err := m.infoWithoutStream(ctx, env, ref, bitrate)
 		if err != nil {
 			return nil, err
 		}
@@ -236,12 +236,12 @@ func (m *Manager) buildStreamInfo(ctx context.Context, env *Env, ref spotifyuri.
 	return info
 }
 
-func (m *Manager) infoWithoutStream(ctx context.Context, env *Env, ref spotifyuri.Ref) (TrackInfo, error) {
+func (m *Manager) infoWithoutStream(ctx context.Context, env *Env, ref spotifyuri.Ref, bitrate int) (TrackInfo, error) {
 	metas, err := fetchTracks(ctx, env, []string{ref.URI})
 	if err != nil {
 		return TrackInfo{}, err
 	}
-	return BuildTrackInfo(ref.URI, metas[ref.URI], 320), nil
+	return BuildTrackInfo(ref.URI, metas[ref.URI], bitrate), nil
 }
 
 // audioFiles fetches the loudness metadata of the resolved track. It is

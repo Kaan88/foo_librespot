@@ -1,7 +1,6 @@
 package spotifyx
 
 import (
-	"encoding/hex"
 	"fmt"
 	"math"
 
@@ -35,6 +34,13 @@ type TrackInfo struct {
 type trackMeta struct {
 	Track *metadatapb.Track
 	Audio *audiofilespb.AudioFilesExtensionResponse
+}
+
+// trackInfoKey identifies a cached track_info: the same track described for two
+// preferred bitrates has two entries.
+type trackInfoKey struct {
+	uri     string
+	bitrate int
 }
 
 // BuildTrackInfo converts Spotify metadata into the protocol shape. uri is the
@@ -154,24 +160,5 @@ func coverURL(album *metadatapb.Album) string {
 	if len(images) == 0 {
 		images = album.GetCover()
 	}
-
-	var best *metadatapb.Image
-	var bestSize int64
-	for _, img := range images {
-		if len(img.GetFileId()) == 0 {
-			continue
-		}
-		size := int64(img.GetWidth()) * int64(img.GetHeight())
-		if size == 0 {
-			// Older metadata carries only the named size (small..xlarge).
-			size = int64(img.GetSize()) + 1
-		}
-		if best == nil || size > bestSize {
-			best, bestSize = img, size
-		}
-	}
-	if best == nil {
-		return ""
-	}
-	return "https://i.scdn.co/image/" + hex.EncodeToString(best.GetFileId())
+	return bestImageURL(images)
 }

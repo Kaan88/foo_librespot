@@ -12,8 +12,10 @@ func TestParseAccepts(t *testing.T) {
 	}{
 		{"spotify:track:" + id, KindTrack, "spotify:track:" + id},
 		{"spotify:album:" + id, KindAlbum, "spotify:album:" + id},
+		{"spotify:artist:" + id, KindArtist, "spotify:artist:" + id},
 		{"spotify:playlist:" + id, KindPlaylist, "spotify:playlist:" + id},
 		{"https://open.spotify.com/track/" + id, KindTrack, "spotify:track:" + id},
+		{"https://open.spotify.com/artist/" + id, KindArtist, "spotify:artist:" + id},
 		{"https://open.spotify.com/track/" + id + "?si=abc123", KindTrack, "spotify:track:" + id},
 		{"https://open.spotify.com/intl-de/track/" + id, KindTrack, "spotify:track:" + id},
 		{"open.spotify.com/album/" + id + "?si=x", KindAlbum, "spotify:album:" + id},
@@ -38,7 +40,7 @@ func TestParseAccepts(t *testing.T) {
 func TestParseRejects(t *testing.T) {
 	cases := []string{
 		"",
-		"spotify:artist:4uLU6hMCjMI75M1A2tKUQC",
+		"spotify:show:4uLU6hMCjMI75M1A2tKUQC",
 		"spotify:track:short",
 		"spotify:track:4uLU6hMCjMI75M1A2tKUQC:extra",
 		"spotify:user:someuser:playlists",

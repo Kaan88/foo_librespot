@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,6 +145,12 @@ func (s *Server) handle(conn net.Conn) {
 		s.info(ctx, conn, &req)
 	case "open":
 		s.open(ctx, conn, &req)
+	case "library":
+		s.library(ctx, conn)
+	case "search":
+		s.search(ctx, conn, &req)
+	case "artist":
+		s.artist(ctx, conn, &req)
 	default:
 		s.writeError(conn, badRequest(fmt.Sprintf("unknown op %q", req.Op)))
 	}
@@ -171,13 +178,17 @@ func (s *Server) resolve(ctx context.Context, conn net.Conn, req *request) {
 		s.writeError(conn, badRequest(err.Error()))
 		return
 	}
+	if ref.Kind == spotifyuri.KindArtist {
+		s.writeError(conn, badRequest("resolve does not expand artists; use the artist op"))
+		return
+	}
 
-	tracks, err := s.mgr.Resolve(ctx, ref)
+	tracks, info, err := s.mgr.Resolve(ctx, ref)
 	if err != nil {
 		s.writeError(conn, err)
 		return
 	}
-	s.writeJSON(conn, tracksResponse{OK: true, Tracks: tracks})
+	s.writeJSON(conn, resolveResponse{OK: true, Tracks: tracks, Context: info})
 }
 
 func (s *Server) info(ctx context.Context, conn net.Conn, req *request) {
@@ -190,12 +201,88 @@ func (s *Server) info(ctx context.Context, conn net.Conn, req *request) {
 		return
 	}
 
-	tracks, err := s.mgr.Info(ctx, req.URIs)
+	bitrate := 320
+	if req.Bitrate != nil {
+		switch *req.Bitrate {
+		case 96, 160, 320:
+			bitrate = *req.Bitrate
+		default:
+			s.writeError(conn, badRequest("bitrate must be 96, 160 or 320"))
+			return
+		}
+	}
+
+	tracks, err := s.mgr.Info(ctx, req.URIs, bitrate)
 	if err != nil {
 		s.writeError(conn, err)
 		return
 	}
 	s.writeJSON(conn, tracksResponse{OK: true, Tracks: tracks})
+}
+
+func (s *Server) library(ctx context.Context, conn net.Conn) {
+	sections, err := s.mgr.Library(ctx)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, libraryResponse{OK: true, Sections: sections})
+}
+
+func (s *Server) search(ctx context.Context, conn net.Conn, req *request) {
+	if strings.TrimSpace(req.Query) == "" {
+		s.writeError(conn, badRequest("search needs a non-empty query"))
+		return
+	}
+	limit := 20
+	if req.Limit != nil {
+		if *req.Limit <= 0 {
+			s.writeError(conn, badRequest("limit must be positive"))
+			return
+		}
+		limit = *req.Limit
+		if limit > 50 {
+			limit = 50
+		}
+	}
+
+	result, err := s.mgr.Search(ctx, req.Query, limit)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, searchResponse{
+		OK:        true,
+		Tracks:    result.Tracks,
+		Albums:    result.Albums,
+		Artists:   result.Artists,
+		Playlists: result.Playlists,
+	})
+}
+
+func (s *Server) artist(ctx context.Context, conn net.Conn, req *request) {
+	ref, err := spotifyuri.Parse(req.URI)
+	if err != nil {
+		s.writeError(conn, badRequest(err.Error()))
+		return
+	}
+	if ref.Kind != spotifyuri.KindArtist {
+		s.writeError(conn, badRequest(fmt.Sprintf("%s is not an artist", ref.URI)))
+		return
+	}
+
+	page, err := s.mgr.Artist(ctx, ref.URI)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, artistResponse{
+		OK:        true,
+		Artist:    page.Artist,
+		TopTracks: page.TopTracks,
+		Albums:    page.Albums,
+		Singles:   page.Singles,
+	})
 }
 
 func (s *Server) open(ctx context.Context, conn net.Conn, req *request) {
@@ -340,14 +427,30 @@ func describe(req *request) string {
 	}
 	switch req.Op {
 	case "info":
-		return fmt.Sprintf("info with %d uris", len(req.URIs))
+		return fmt.Sprintf("info with %d uris at %d kbps", len(req.URIs), requestedBitrate(req))
 	case "open":
 		start := int64(0)
 		if req.StartMs != nil {
 			start = *req.StartMs
 		}
 		return fmt.Sprintf("open %s at %d ms", uri, start)
+	case "search":
+		return fmt.Sprintf("search %q (limit %d)", req.Query, requestedLimit(req))
 	default:
 		return fmt.Sprintf("%s %s", req.Op, uri)
 	}
+}
+
+func requestedBitrate(req *request) int {
+	if req.Bitrate == nil {
+		return 320
+	}
+	return *req.Bitrate
+}
+
+func requestedLimit(req *request) int {
+	if req.Limit == nil {
+		return 20
+	}
+	return *req.Limit
 }

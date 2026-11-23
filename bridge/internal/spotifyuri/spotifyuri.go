@@ -14,6 +14,7 @@ type Kind string
 const (
 	KindTrack    Kind = "track"
 	KindAlbum    Kind = "album"
+	KindArtist   Kind = "artist"
 	KindPlaylist Kind = "playlist"
 	KindLiked    Kind = "liked"
 )
@@ -60,7 +61,7 @@ func parseURI(s string) (Ref, error) {
 	}
 
 	switch parts[1] {
-	case "track", "album", "playlist":
+	case "track", "album", "artist", "playlist":
 		if len(parts) != 3 {
 			return Ref{}, fmt.Errorf("invalid spotify uri %q", s)
 		}
@@ -103,7 +104,7 @@ func parseURL(s string) (Ref, error) {
 
 	kind := Kind(segments[0])
 	switch kind {
-	case KindTrack, KindAlbum, KindPlaylist:
+	case KindTrack, KindAlbum, KindArtist, KindPlaylist:
 	default:
 		return Ref{}, fmt.Errorf("unsupported spotify link type %q", segments[0])
 	}

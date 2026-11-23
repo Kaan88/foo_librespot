@@ -24,13 +24,19 @@ import (
 const usage = `Usage:
   bridgectl [--pipe <name>] status
   bridgectl [--pipe <name>] resolve <uri-or-url>
-  bridgectl [--pipe <name>] info <uri-or-url>...
+  bridgectl [--pipe <name>] info <uri-or-url>... [--bitrate 96|160|320]
+  bridgectl [--pipe <name>] library
+  bridgectl [--pipe <name>] search <query> [--limit N]
+  bridgectl [--pipe <name>] artist <uri-or-url>
   bridgectl [--pipe <name>] open-to-wav <uri-or-url> <out.wav> [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 
 Commands:
   status         Ask the bridge for its login and session state.
   resolve        Expand a track, album, playlist or Liked Songs reference.
   info           Fetch metadata for one or more tracks.
+  library        List the Spotify tab's sections.
+  search         Search Spotify (tracks, albums, artists).
+  artist         Fetch an artist page: top tracks, albums, singles.
   open-to-wav    Open a track, print the header and write the PCM to a WAV.
 `
 
@@ -74,17 +80,75 @@ func run(args []string) int {
 		}
 		return doJSON(*pipe, map[string]any{"op": "resolve", "uri": rest[1]})
 	case "info":
-		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "bridgectl: info needs at least one uri")
+		return doInfo(*pipe, rest[1:])
+	case "library":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "bridgectl: library takes no arguments")
 			return 2
 		}
-		return doJSON(*pipe, map[string]any{"op": "info", "uris": rest[1:]})
+		return doJSON(*pipe, map[string]any{"op": "library"})
+	case "search":
+		return doSearch(*pipe, rest[1:])
+	case "artist":
+		if len(rest) != 2 {
+			fmt.Fprintln(os.Stderr, "bridgectl: artist needs one uri")
+			return 2
+		}
+		return doJSON(*pipe, map[string]any{"op": "artist", "uri": rest[1]})
 	case "open-to-wav":
 		return doOpen(*pipe, rest[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "bridgectl: unknown command %q\n\n%s", rest[0], usage)
 		return 2
 	}
+}
+
+func doInfo(pipe string, args []string) int {
+	fs := flag.NewFlagSet("info", flag.ContinueOnError)
+	bitrate := fs.Int("bitrate", 320, "preferred bitrate (96, 160 or 320)")
+
+	flags, positional := splitFlags(args)
+	if err := fs.Parse(flags); err != nil {
+		return 2
+	}
+	if len(positional) == 0 {
+		fmt.Fprintln(os.Stderr, "bridgectl: info needs at least one uri")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{"op": "info", "uris": positional, "bitrate": *bitrate})
+}
+
+func doSearch(pipe string, args []string) int {
+	fs := flag.NewFlagSet("search", flag.ContinueOnError)
+	limit := fs.Int("limit", 20, "results per category (max 50)")
+
+	flags, positional := splitFlags(args)
+	if err := fs.Parse(flags); err != nil {
+		return 2
+	}
+	if len(positional) == 0 {
+		fmt.Fprintln(os.Stderr, "bridgectl: search needs a query")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{"op": "search", "query": strings.Join(positional, " "), "limit": *limit})
+}
+
+// splitFlags separates flag arguments from positionals so a command's flags can
+// follow its positionals, as users write "search nation of language --limit 5".
+func splitFlags(args []string) (flags, positional []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		if !strings.Contains(arg, "=") && i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
+		}
+	}
+	return flags, positional
 }
 
 func dial(pipe string) (net.Conn, error) {
