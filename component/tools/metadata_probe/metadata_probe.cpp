@@ -68,6 +68,11 @@ void test_track_metadata() {
 	check(meta_is(info, "TRACKNUMBER", "3"), "TRACKNUMBER");
 	check(meta_is(info, "DISCNUMBER", "2"), "DISCNUMBER");
 	check(meta_is(info, "DATE", "2020"), "DATE");
+	check(meta_is(info, "SOURCE", "Spotify"), "SOURCE=Spotify for now-playing scripts");
+
+	const char* spotifyUri = info.info_get("spotify_uri");
+	check(spotifyUri != nullptr && std::strcmp(spotifyUri, track.uri.c_str()) == 0,
+		"spotify_uri technical field");
 
 	const char* codec = info.info_get("codec");
 	check(codec != nullptr && std::strcmp(codec, "vorbis") == 0, "codec");

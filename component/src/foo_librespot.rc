@@ -13,16 +13,22 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 // Dialog
 //
 
-IDD_PREFERENCES DIALOGEX 0, 0, 320, 96
+IDD_PREFERENCES DIALOGEX 0, 0, 320, 146
 STYLE DS_SETFONT | WS_CHILD
 FONT 8, "Microsoft Sans Serif", 400, 0, 0x0
 BEGIN
     LTEXT           "Bridge status:",IDC_STATIC,10,8,60,8
     LTEXT           "Checking...",IDC_STATUS,10,20,300,24
-    PUSHBUTTON      "Log in...",IDC_LOGIN,10,50,60,14
-    PUSHBUTTON      "Refresh",IDC_REFRESH,76,50,60,14
-    LTEXT           "Streaming bitrate:",IDC_STATIC,10,74,68,8
-    COMBOBOX        IDC_BITRATE,82,72,110,80,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Log in...",IDC_LOGIN,10,48,60,14
+    PUSHBUTTON      "Refresh",IDC_REFRESH,76,48,60,14
+    LTEXT           "Streaming bitrate:",IDC_STATIC,10,72,68,8
+    COMBOBOX        IDC_BITRATE,82,70,110,80,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Sync playlists every:",IDC_STATIC,10,92,68,8
+    COMBOBOX        IDC_SYNC,82,90,140,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Playlist name prefix:",IDC_STATIC,10,112,68,8
+    EDITTEXT        IDC_PREFIX,82,110,220,14,ES_AUTOHSCROLL
+    LTEXT           "Playlists linked to Spotify are named <prefix><name>; 0 minutes disables the timer.",
+                    IDC_STATIC,10,130,300,10
 END
 
 IDD_ADD_LINK DIALOGEX 0, 0, 360, 208
@@ -42,8 +48,8 @@ END
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION 0,2,0,0
+ PRODUCTVERSION 0,2,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -60,11 +66,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "foo_librespot"
             VALUE "FileDescription", "foo_librespot"
-            VALUE "FileVersion", "0.1.0.0"
+            VALUE "FileVersion", "0.2.0.0"
             VALUE "InternalName", "foo_librespot"
             VALUE "OriginalFilename", "foo_librespot.dll"
             VALUE "ProductName", "foo_librespot"
-            VALUE "ProductVersion", "0.1.0.0"
+            VALUE "ProductVersion", "0.2.0.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -1,4 +1,4 @@
-// Client for proto/PROTOCOL.md (bridge protocol v1).
+// Client for proto/PROTOCOL.md (bridge protocol v1 plus the v2 additions).
 // One connection per request; `open` keeps the connection for raw PCM.
 
 #pragma once
@@ -55,6 +55,53 @@ struct bridge_error : std::runtime_error {
 	std::string code;
 };
 
+// The context a resolve reply describes (album, playlist, Liked Songs), v2.
+struct context_info {
+	std::string uri;
+	std::string name;
+	std::string owner;
+	std::string image_url;
+	std::string revision; // opaque; changes whenever the contents change
+	long long track_count = 0;
+};
+
+// One entry of the Spotify tab (v2 `library`, `search`, `artist`).
+struct library_item {
+	std::string uri;
+	std::string kind; // "playlist", "album", "artist" or "collection"
+	std::string name;
+	std::string subtitle;
+	std::string image_url;
+	std::string revision;
+	long long track_count = 0;
+};
+
+struct library_section {
+	std::string id;
+	std::string title;
+	std::vector<library_item> items;
+};
+
+struct resolve_result {
+	std::vector<track_info> tracks;
+	bool has_context = false;
+	context_info context;
+};
+
+struct search_result {
+	std::vector<track_info> tracks;
+	std::vector<library_item> albums;
+	std::vector<library_item> artists;
+	std::vector<library_item> playlists;
+};
+
+struct artist_result {
+	library_item artist;
+	std::vector<track_info> top_tracks;
+	std::vector<library_item> albums;
+	std::vector<library_item> singles;
+};
+
 struct open_result {
 	track_info track;
 	int sample_rate = 44100;
@@ -73,9 +120,32 @@ public:
 		unsigned reply_timeout_ms = 10000);
 
 	std::vector<track_info> info(const std::vector<std::string>& uris, const cancel_token& ct,
-		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000,
+		int bitrate_kbps = 0);
 
 	std::vector<track_info> resolve(const std::string& uri, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// v2: resolve plus the album/playlist context (name, revision, ...).
+	resolve_result resolve_context(const std::string& uri, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// v2: contents of the Spotify tab.
+	std::vector<library_section> library(const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// v2: search, `limit` per category.
+	search_result search(const std::string& query, int limit, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// v2: artist page.
+	artist_result artist(const std::string& uri, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// Sends one JSON request line and returns the parsed reply. Used by the
+	// console harness for the fake bridge's test-only ops; production code
+	// should use the typed methods above.
+	json::value raw_request(const std::string& payload, const cancel_token& ct,
 		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
 
 	// Sends `open`; on success the returned object owns the connection and the

@@ -49,23 +49,86 @@ void print_track(const flp::track_info& track) {
 		track.has_track_peak ? "yes" : "no");
 }
 
+void print_item(const flp::library_item& item) {
+	std::printf("item uri=%s kind=%s name=%s subtitle=%s count=%lld revision=%s\n",
+		item.uri.c_str(), item.kind.c_str(), item.name.c_str(), item.subtitle.c_str(),
+		item.track_count, item.revision.c_str());
+}
+
 int run_status(flp::bridge_client& client) {
 	print_status(client.status(never_cancel()));
 	return 0;
 }
 
-int run_info(flp::bridge_client& client, const std::vector<std::string>& uris) {
-	const std::vector<flp::track_info> tracks = client.info(uris, never_cancel());
+int run_info(flp::bridge_client& client, const std::vector<std::string>& uris, int bitrate) {
+	const std::vector<flp::track_info> tracks =
+		client.info(uris, never_cancel(), 5000, 60000, bitrate);
 	std::printf("info count=%zu\n", tracks.size());
 	for (const flp::track_info& track : tracks) print_track(track);
 	return tracks.empty() ? 4 : 0;
 }
 
 int run_resolve(flp::bridge_client& client, const std::string& uri) {
-	const std::vector<flp::track_info> tracks = client.resolve(uri, never_cancel());
-	std::printf("resolve count=%zu\n", tracks.size());
-	for (const flp::track_info& track : tracks) print_track(track);
-	return tracks.empty() ? 4 : 0;
+	const flp::resolve_result resolved = client.resolve_context(uri, never_cancel());
+	std::printf("resolve count=%zu\n", resolved.tracks.size());
+	for (const flp::track_info& track : resolved.tracks) print_track(track);
+	if (resolved.has_context) {
+		std::printf("context uri=%s name=%s owner=%s revision=%s track_count=%lld\n",
+			resolved.context.uri.c_str(), resolved.context.name.c_str(),
+			resolved.context.owner.c_str(), resolved.context.revision.c_str(),
+			resolved.context.track_count);
+	} else {
+		std::printf("context none\n");
+	}
+	return resolved.tracks.empty() ? 4 : 0;
+}
+
+int run_library(flp::bridge_client& client) {
+	const std::vector<flp::library_section> sections = client.library(never_cancel());
+	std::printf("library sections=%zu\n", sections.size());
+	for (const flp::library_section& section : sections) {
+		std::printf("section id=%s title=%s items=%zu\n", section.id.c_str(),
+			section.title.c_str(), section.items.size());
+		for (const flp::library_item& item : section.items) print_item(item);
+	}
+	return sections.empty() ? 4 : 0;
+}
+
+int run_search(flp::bridge_client& client, const std::string& query, int limit) {
+	const flp::search_result result = client.search(query, limit, never_cancel());
+	std::printf("search tracks=%zu albums=%zu artists=%zu playlists=%zu\n",
+		result.tracks.size(), result.albums.size(), result.artists.size(),
+		result.playlists.size());
+	for (const flp::track_info& track : result.tracks) print_track(track);
+	for (const flp::library_item& item : result.albums) print_item(item);
+	for (const flp::library_item& item : result.artists) print_item(item);
+	for (const flp::library_item& item : result.playlists) print_item(item);
+	return (result.tracks.empty() && result.albums.empty() && result.artists.empty() &&
+			   result.playlists.empty())
+		? 4
+		: 0;
+}
+
+int run_artist(flp::bridge_client& client, const std::string& uri) {
+	const flp::artist_result result = client.artist(uri, never_cancel());
+	std::printf("artist top_tracks=%zu albums=%zu singles=%zu\n", result.top_tracks.size(),
+		result.albums.size(), result.singles.size());
+	print_item(result.artist);
+	for (const flp::track_info& track : result.top_tracks) print_track(track);
+	for (const flp::library_item& item : result.albums) print_item(item);
+	for (const flp::library_item& item : result.singles) print_item(item);
+	return result.albums.empty() ? 4 : 0;
+}
+
+int run_control(flp::bridge_client& client, const std::string& revision, int tracks) {
+	std::string payload = "{\"op\":\"test_control\"";
+	if (!revision.empty()) payload += ",\"revision\":" + flp::json::quote(revision);
+	if (tracks >= 0) payload += ",\"tracks\":" + std::to_string(tracks);
+	payload += "}";
+	const flp::json::value reply = client.raw_request(payload, never_cancel());
+	std::printf("control revision=%s tracks=%lld\n", reply.get_string("revision").c_str(),
+		reply.get_int64("tracks"));
+	return 0;
 }
 
 int run_play(flp::bridge_client& client, const std::string& uri, int startMs, long long frameLimit,
@@ -183,7 +246,8 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName) {
 }
 
 void usage() {
-	std::printf("usage: bridge_probe [--pipe NAME] <status|info|resolve|play|spawn> ...\n");
+	std::printf("usage: bridge_probe [--pipe NAME] <status|info|resolve|library|search|artist|"
+				"control|play|spawn> ...\n");
 }
 
 } // namespace
@@ -223,11 +287,20 @@ int main(int argc, char** argv) {
 		if (mode == "status") return run_status(client);
 
 		if (mode == "info") {
-			if (arguments.size() < 2) {
+			int bitrate = 0;
+			std::vector<std::string> uris;
+			for (size_t i = 1; i < arguments.size(); ++i) {
+				if (arguments[i] == "--bitrate" && i + 1 < arguments.size()) {
+					bitrate = std::atoi(arguments[++i].c_str());
+				} else {
+					uris.push_back(arguments[i]);
+				}
+			}
+			if (uris.empty()) {
 				usage();
 				return 2;
 			}
-			return run_info(client, std::vector<std::string>(arguments.begin() + 1, arguments.end()));
+			return run_info(client, uris, bitrate);
 		}
 
 		if (mode == "resolve") {
@@ -236,6 +309,41 @@ int main(int argc, char** argv) {
 				return 2;
 			}
 			return run_resolve(client, arguments[1]);
+		}
+
+		if (mode == "library") return run_library(client);
+
+		if (mode == "search") {
+			if (arguments.size() < 2) {
+				usage();
+				return 2;
+			}
+			int limit = 20;
+			if (arguments.size() >= 4 && arguments[2] == "--limit") {
+				limit = std::atoi(arguments[3].c_str());
+			}
+			return run_search(client, arguments[1], limit);
+		}
+
+		if (mode == "artist") {
+			if (arguments.size() < 2) {
+				usage();
+				return 2;
+			}
+			return run_artist(client, arguments[1]);
+		}
+
+		if (mode == "control") {
+			std::string revision;
+			int tracks = -1;
+			for (size_t i = 1; i < arguments.size(); ++i) {
+				if (arguments[i] == "--revision" && i + 1 < arguments.size()) {
+					revision = arguments[++i];
+				} else if (arguments[i] == "--tracks" && i + 1 < arguments.size()) {
+					tracks = std::atoi(arguments[++i].c_str());
+				}
+			}
+			return run_control(client, revision, tracks);
 		}
 
 		if (mode == "play") {

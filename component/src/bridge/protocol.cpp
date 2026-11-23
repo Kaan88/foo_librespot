@@ -57,13 +57,52 @@ track_info parse_track(const json::value& t) {
 	return out;
 }
 
-std::vector<track_info> parse_tracks(const json::value& reply) {
+std::vector<track_info> parse_tracks(const json::value& reply, const char* key) {
 	std::vector<track_info> out;
-	const json::value* tracks = reply.find("tracks");
+	const json::value* tracks = reply.find(key);
 	if (tracks != nullptr && tracks->is_array()) {
 		out.reserve(tracks->array.size());
 		for (const json::value& t : tracks->array) out.push_back(parse_track(t));
 	}
+	return out;
+}
+
+std::vector<track_info> parse_tracks(const json::value& reply) {
+	return parse_tracks(reply, "tracks");
+}
+
+library_item parse_item(const json::value& value) {
+	library_item out;
+	if (!value.is_object()) return out;
+	out.uri = value.get_string("uri");
+	out.kind = value.get_string("kind");
+	out.name = value.get_string("name");
+	out.subtitle = value.get_string("subtitle");
+	out.image_url = value.get_string("image_url");
+	out.revision = value.get_string("revision");
+	out.track_count = value.get_int64("track_count");
+	return out;
+}
+
+std::vector<library_item> parse_items(const json::value& reply, const char* key) {
+	std::vector<library_item> out;
+	const json::value* items = reply.find(key);
+	if (items != nullptr && items->is_array()) {
+		out.reserve(items->array.size());
+		for (const json::value& item : items->array) out.push_back(parse_item(item));
+	}
+	return out;
+}
+
+context_info parse_context(const json::value& value) {
+	context_info out;
+	if (!value.is_object()) return out;
+	out.uri = value.get_string("uri");
+	out.name = value.get_string("name");
+	out.owner = value.get_string("owner");
+	out.image_url = value.get_string("image_url");
+	out.revision = value.get_string("revision");
+	out.track_count = value.get_int64("track_count");
 	return out;
 }
 
@@ -114,20 +153,87 @@ bridge_status bridge_client::status(const cancel_token& ct, unsigned connect_tim
 }
 
 std::vector<track_info> bridge_client::info(const std::vector<std::string>& uris,
-	const cancel_token& ct, unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const cancel_token& ct, unsigned connect_timeout_ms, unsigned reply_timeout_ms,
+	int bitrate_kbps) {
 	if (uris.empty()) return {};
-	const json::value reply = request(
-		"{\"op\":\"info\",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
-		reply_timeout_ms);
+	std::string payload = "{\"op\":\"info\",\"uris\":" + uris_json(uris);
+	if (bitrate_kbps > 0) payload += ",\"bitrate\":" + std::to_string(bitrate_kbps);
+	payload += "}";
+	const json::value reply = request(payload, ct, connect_timeout_ms, reply_timeout_ms);
 	return parse_tracks(reply);
 }
 
 std::vector<track_info> bridge_client::resolve(const std::string& uri, const cancel_token& ct,
 	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	return resolve_context(uri, ct, connect_timeout_ms, reply_timeout_ms).tracks;
+}
+
+resolve_result bridge_client::resolve_context(const std::string& uri, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
 	const json::value reply = request(
 		"{\"op\":\"resolve\",\"uri\":" + json::quote(uri) + "}", ct, connect_timeout_ms,
 		reply_timeout_ms);
-	return parse_tracks(reply);
+	resolve_result out;
+	out.tracks = parse_tracks(reply);
+	if (const json::value* context = reply.find("context");
+		context != nullptr && context->is_object()) {
+		out.context = parse_context(*context);
+		out.has_context = true;
+	}
+	return out;
+}
+
+std::vector<library_section> bridge_client::library(const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request("{\"op\":\"library\"}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+	std::vector<library_section> out;
+	const json::value* sections = reply.find("sections");
+	if (sections == nullptr || !sections->is_array()) return out;
+	out.reserve(sections->array.size());
+	for (const json::value& section : sections->array) {
+		if (!section.is_object()) continue;
+		library_section parsed;
+		parsed.id = section.get_string("id");
+		parsed.title = section.get_string("title");
+		parsed.items = parse_items(section, "items");
+		out.push_back(std::move(parsed));
+	}
+	return out;
+}
+
+search_result bridge_client::search(const std::string& query, int limit, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	std::string payload = "{\"op\":\"search\",\"query\":" + json::quote(query);
+	if (limit > 0) payload += ",\"limit\":" + std::to_string(limit);
+	payload += "}";
+	const json::value reply = request(payload, ct, connect_timeout_ms, reply_timeout_ms);
+	search_result out;
+	out.tracks = parse_tracks(reply);
+	out.albums = parse_items(reply, "albums");
+	out.artists = parse_items(reply, "artists");
+	out.playlists = parse_items(reply, "playlists");
+	return out;
+}
+
+artist_result bridge_client::artist(const std::string& uri, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request(
+		"{\"op\":\"artist\",\"uri\":" + json::quote(uri) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+	artist_result out;
+	if (const json::value* artist = reply.find("artist"); artist != nullptr) {
+		out.artist = parse_item(*artist);
+	}
+	out.top_tracks = parse_tracks(reply, "top_tracks");
+	out.albums = parse_items(reply, "albums");
+	out.singles = parse_items(reply, "singles");
+	return out;
+}
+
+json::value bridge_client::raw_request(const std::string& payload, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	return request(payload, ct, connect_timeout_ms, reply_timeout_ms);
 }
 
 open_result bridge_client::open(const std::string& uri, long long start_ms, int bitrate,

@@ -33,6 +33,8 @@ import win32pipe
 PIPE_UNLIMITED_INSTANCES = 255
 
 ARGS = None
+STATE = {"revision": "1", "tracks": 3}
+STATE_LOCK = threading.Lock()
 
 
 def log(message):
@@ -40,7 +42,7 @@ def log(message):
         print(f"[fake_bridge] {message}", flush=True)
 
 
-def make_track(uri, index=0):
+def make_track(uri, index=0, bitrate=320):
     """Deterministic metadata for a uri."""
     if uri.startswith("spotify:track:"):
         track_id = uri.split(":")[-1]
@@ -57,7 +59,7 @@ def make_track(uri, index=0):
         "date": "2026",
         "duration_ms": ARGS.duration_ms,
         "codec": "vorbis",
-        "bitrate": 320,
+        "bitrate": bitrate,
         "cover_url": "",
         "track_gain_db": -7.25,
         "track_peak": 0.9,
@@ -67,15 +69,117 @@ def make_track(uri, index=0):
     }
 
 
-def resolve_tracks(uri):
+def make_item(uri, kind, name, subtitle="", revision=None, track_count=None):
+    return {
+        "uri": uri,
+        "kind": kind,
+        "name": name,
+        "subtitle": subtitle,
+        "image_url": None,
+        "track_count": track_count,
+        "revision": revision,
+    }
+
+
+def context_name(uri):
+    if uri.startswith("spotify:album:"):
+        return "Fake Album"
+    if uri.startswith("spotify:user:"):
+        return "Liked Songs"
+    if uri.startswith("spotify:artist:"):
+        return "Fake Artist"
+    return "Fake Playlist"
+
+
+def make_library():
+    with STATE_LOCK:
+        revision = STATE["revision"]
+        count = STATE["tracks"]
+    return {
+        "ok": True,
+        "sections": [
+            {"id": "liked", "title": "Liked Songs", "items": [
+                make_item("spotify:user:fake_user:collection", "collection", "Liked Songs",
+                          "", revision, count)]},
+            {"id": "made_for_you", "title": "Made for you", "items": [
+                make_item("spotify:playlist:made000000000000000001", "playlist",
+                          "Daily Mix 1", "Spotify", revision, count),
+                make_item("spotify:playlist:made000000000000000002", "playlist",
+                          "Discover Weekly", "Spotify", revision, count)]},
+            {"id": "playlists", "title": "Your playlists", "items": [
+                make_item("spotify:playlist:user000000000000000001", "playlist",
+                          "Road Trip", "fake_user", revision, count)]},
+            {"id": "albums", "title": "Albums", "items": [
+                make_item("spotify:album:alb0000000000000000001", "album",
+                          "Saved Album One", "Fake Artist", revision, count),
+                make_item("spotify:album:alb0000000000000000002", "album",
+                          "Saved Album Two", "Fake Artist", revision, count)]},
+            {"id": "artists", "title": "Artists", "items": [
+                make_item("spotify:artist:art0000000000000000001", "artist",
+                          "Fake Artist", "", None, count)]},
+        ],
+    }
+
+
+def make_search(query, limit):
+    limit = max(1, min(limit, 50))
+    with STATE_LOCK:
+        revision = STATE["revision"]
+        count = STATE["tracks"]
+    return {
+        "ok": True,
+        "tracks": [make_track("", i) for i in range(min(2, limit))],
+        "albums": [make_item("spotify:album:sea0000000000000000001", "album",
+                             f"{query} Album", "Fake Artist", revision, count)],
+        "artists": [make_item("spotify:artist:sea0000000000000000001", "artist",
+                              f"{query} Artist", "", None, count)],
+        "playlists": [make_item("spotify:playlist:sea0000000000000000001", "playlist",
+                                f"{query} Playlist", "fake_user", revision, count)],
+    }
+
+
+def make_artist(uri):
+    with STATE_LOCK:
+        revision = STATE["revision"]
+        count = STATE["tracks"]
+    return {
+        "ok": True,
+        "artist": make_item(uri, "artist", "Fake Artist", "", None, count),
+        "top_tracks": [make_track("", 0), make_track("", 1)],
+        "albums": [
+            make_item("spotify:album:art0000000000000000001", "album",
+                      "Artist Album One", "Fake Artist", revision, count),
+            make_item("spotify:album:art0000000000000000002", "album",
+                      "Artist Album Two", "Fake Artist", revision, count),
+        ],
+        "singles": [
+            make_item("spotify:album:art0000000000000000003", "album",
+                      "Artist Single", "Fake Artist", revision, count),
+        ],
+    }
+
+
+def resolve_reply(uri):
     if uri.startswith("spotify:track:") or "/track/" in uri:
         if uri.startswith("spotify:track:"):
-            return [make_track(uri)]
+            return {"ok": True, "tracks": [make_track(uri)]}
         track_id = uri.split("/track/")[1].split("?")[0]
-        return [make_track(f"spotify:track:{track_id}")]
-    # album / playlist / anything else: a few tracks
+        return {"ok": True, "tracks": [make_track(f"spotify:track:{track_id}")]}
+
+    with STATE_LOCK:
+        revision = STATE["revision"]
+        count = STATE["tracks"]
     base = abs(hash(uri)) % 1000000
-    return [make_track(f"spotify:track:{base + i:022d}", i) for i in range(3)]
+    tracks = [make_track(f"spotify:track:{base + i:022d}", i) for i in range(count)]
+    context = {
+        "uri": uri,
+        "name": context_name(uri),
+        "owner": "Fake Owner",
+        "image_url": None,
+        "revision": revision,
+        "track_count": count,
+    }
+    return {"ok": True, "tracks": tracks, "context": context}
 
 
 def error_reply(code, message):
@@ -138,30 +242,55 @@ def handle_connection(handle):
             write_all(handle, (json.dumps(reply) + "\n").encode("utf-8"))
             return
 
-        if ARGS.logged_out and op in ("info", "resolve", "open"):
+        if ARGS.logged_out and op in ("info", "resolve", "open", "library", "search", "artist"):
             write_all(handle, (json.dumps(error_reply("not_logged_in", "not logged in")) + "\n").encode("utf-8"))
             return
 
         if op == "info":
             uris = request.get("uris", [])
-            tracks = [make_track(uri, i) for i, uri in enumerate(uris)]
+            bitrate = int(request.get("bitrate", 320))
+            tracks = [make_track(uri, i, bitrate) for i, uri in enumerate(uris)]
             write_all(handle, (json.dumps({"ok": True, "tracks": tracks}) + "\n").encode("utf-8"))
             return
 
         if op == "resolve":
-            tracks = resolve_tracks(request.get("uri", ""))
-            log(f"resolved {len(tracks)} track(s)")
-            write_all(handle, (json.dumps({"ok": True, "tracks": tracks}) + "\n").encode("utf-8"))
+            reply = resolve_reply(request.get("uri", ""))
+            log(f"resolved {len(reply['tracks'])} track(s)")
+            write_all(handle, (json.dumps(reply) + "\n").encode("utf-8"))
+            return
+
+        if op == "library":
+            write_all(handle, (json.dumps(make_library()) + "\n").encode("utf-8"))
+            return
+
+        if op == "search":
+            write_all(handle, (json.dumps(make_search(request.get("query", ""),
+                                                      int(request.get("limit", 20)))) + "\n").encode("utf-8"))
+            return
+
+        if op == "artist":
+            write_all(handle, (json.dumps(make_artist(request.get("uri", ""))) + "\n").encode("utf-8"))
+            return
+
+        if op == "test_control":
+            with STATE_LOCK:
+                if "revision" in request:
+                    STATE["revision"] = str(request["revision"])
+                if "tracks" in request:
+                    STATE["tracks"] = int(request["tracks"])
+                reply = {"ok": True, "revision": STATE["revision"], "tracks": STATE["tracks"]}
+            write_all(handle, (json.dumps(reply) + "\n").encode("utf-8"))
             return
 
         if op == "open":
             uri = request.get("uri", "")
+            bitrate = int(request.get("bitrate", 320))
             start_ms = int(request.get("start_ms", 0))
             start_frame = round(start_ms * ARGS.rate / 1000.0)
             total_frames = round(ARGS.duration_ms * ARGS.rate / 1000.0)
             header = {
                 "ok": True,
-                "track": make_track(uri),
+                "track": make_track(uri, 0, bitrate),
                 "sample_rate": ARGS.rate,
                 "channels": ARGS.channels,
                 "start_frame": start_frame,
@@ -169,6 +298,9 @@ def handle_connection(handle):
             log(f"open start_ms={start_ms} start_frame={start_frame}")
             write_all(handle, (json.dumps(header) + "\n").encode("utf-8"))
             stream_pcm(handle, start_frame, total_frames)
+            # Closing a pipe with unread data discards the tail; wait for the
+            # client to drain it first.
+            win32file.FlushFileBuffers(handle)
             return
 
         write_all(handle, (json.dumps(error_reply("bad_request", f"unknown op {op}")) + "\n").encode("utf-8"))
@@ -217,9 +349,13 @@ def main():
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--realtime", action="store_true")
     parser.add_argument("--logged-out", action="store_true")
+    parser.add_argument("--revision", default="1")
+    parser.add_argument("--tracks", type=int, default=3)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--parent-pid", type=int, default=0)
     ARGS = parser.parse_args()
+    STATE["revision"] = ARGS.revision
+    STATE["tracks"] = ARGS.tracks
 
     log(f"listening on \\\\.\\pipe\\{ARGS.pipe} (duration {ARGS.duration_ms} ms, "
         f"{ARGS.rate} Hz, {ARGS.channels} ch{', logged out' if ARGS.logged_out else ''})")
