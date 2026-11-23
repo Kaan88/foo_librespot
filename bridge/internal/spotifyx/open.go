@@ -43,6 +43,9 @@ type OpenResult struct {
 	// EndOfTrack is set when the requested position is at/after the end: the
 	// header is valid but there is no audio to send.
 	EndOfTrack bool
+	// FromCache is true when the encrypted audio file came from the on-disk
+	// audio cache.
+	FromCache bool
 }
 
 // Close releases the decoder behind an OpenResult.
@@ -86,14 +89,25 @@ func (m *Manager) Open(ctx context.Context, ref spotifyuri.Ref, startMs int64, b
 	}
 
 	var result *OpenResult
+	began := time.Now()
+	hitsBefore := m.cacheHits.Load()
 	err = m.Do(ctx, func(env *Env) error {
 		var err error
 		result, err = m.openOnce(ctx, env, ref, *id, startMs, bitrate)
 		return err
 	})
 	if err != nil {
+		m.log.Warnf("open %s failed after %s: %v", ref.URI, time.Since(began).Round(time.Millisecond), err)
 		return nil, err
 	}
+	// Opens run concurrently, so this can over-attribute a hit to a neighbour;
+	// it is exact for the usual one-open-at-a-time playback.
+	result.FromCache = m.cacheHits.Load() > hitsBefore
+	source := "network"
+	if result.FromCache {
+		source = "cache"
+	}
+	m.log.Infof("opened %s at %d ms from %s in %s", ref.URI, startMs, source, time.Since(began).Round(time.Millisecond))
 	return result, nil
 }
 
@@ -231,6 +245,12 @@ func (m *Manager) buildStreamInfo(ctx context.Context, env *Env, ref spotifyuri.
 	}
 
 	info := BuildTrackInfo(ref.URI, meta, 320)
+	if hg, ok := headerGains(st.Source); ok {
+		// Debug aid for checking the AUDIO_FILES values against the ogg header's
+		// own gains (the header's reference level differs from ReplayGain's).
+		m.log.Debugf("ogg header gains for %s: track %.2f dB (peak %.4f), album %.2f dB (peak %.4f); AUDIO_FILES loudness-based track gain %s, album gain %s",
+			ref.URI, hg[0], hg[1], hg[2], hg[3], fmtGain(info.TrackGainDB), fmtGain(info.AlbumGainDB))
+	}
 	info.Codec = player.GetFormatCodec(st.File.GetFormat())
 	info.Bitrate = player.GetFormatBitrate(st.File.GetFormat())
 	return info
@@ -288,4 +308,43 @@ func (g *granuleReader) get() (int64, bool) {
 		return 0, false
 	}
 	return g.field.Int(), true
+}
+
+// headerGains reads the replay-gain segment of the Spotify ogg metadata page
+// (track gain, track peak, album gain, album peak) from the Vorbis decoder's
+// unexported state. It exists for a debug log line only: nothing depends on it,
+// and any change in the library's layout simply yields ok=false.
+func headerGains(src librespot.AudioSource) (gains [4]float64, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	v := reflect.ValueOf(src)
+	if v.Kind() == reflect.Pointer && !v.IsNil() {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return gains, false
+	}
+	meta := v.FieldByName("meta")
+	if !meta.IsValid() || meta.Kind() != reflect.Pointer || meta.IsNil() {
+		return gains, false
+	}
+	meta = meta.Elem()
+	for i, name := range []string{"trackGainDb", "trackPeak", "albumGainDb", "albumPeak"} {
+		f := meta.FieldByName(name)
+		if !f.IsValid() || (f.Kind() != reflect.Float32 && f.Kind() != reflect.Float64) {
+			return gains, false
+		}
+		gains[i] = f.Float()
+	}
+	return gains, true
+}
+
+func fmtGain(g *float64) string {
+	if g == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%.2f dB", *g)
 }

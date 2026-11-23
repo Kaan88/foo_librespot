@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the bridge implementation version reported by status.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // Error codes of the protocol.
 const (
@@ -18,6 +18,12 @@ const (
 	CodeBadRequest  = "bad_request"
 	CodeInternal    = "internal"
 	CodeUnsupported = "unsupported"
+
+	// Phase 5: specific failures (see spotifyx.Classify).
+	CodePremiumRequired   = spotifyx.CodePremiumRequired
+	CodeRateLimited       = spotifyx.CodeRateLimited
+	CodeRegionUnavailable = spotifyx.CodeRegionUnavailable
+	CodeTrackUnavailable  = spotifyx.CodeTrackUnavailable
 )
 
 // request is one JSON line from a client.
@@ -32,6 +38,9 @@ type request struct {
 	// Playlist and DryRun belong to playlist_add.
 	Playlist string `json:"playlist"`
 	DryRun   bool   `json:"dry_run"`
+	// CacheMB and ClearCache belong to config.
+	CacheMB    *int `json:"cache_mb"`
+	ClearCache bool `json:"clear_cache"`
 }
 
 type statusResponse struct {
@@ -42,6 +51,17 @@ type statusResponse struct {
 	State     string `json:"state"`
 	LastError string `json:"last_error"`
 	Version   string `json:"version"`
+	// Optional (v4): account product type and the error code of last_error.
+	Product       string `json:"product,omitempty"`
+	LastErrorCode string `json:"last_error_code,omitempty"`
+}
+
+// configResponse answers the config op with the cache state.
+type configResponse struct {
+	OK         bool   `json:"ok"`
+	CacheMB    int    `json:"cache_mb"`
+	CacheDir   string `json:"cache_dir"`
+	CacheBytes int64  `json:"cache_bytes"`
 }
 
 type tracksResponse struct {
@@ -101,12 +121,17 @@ type openHeader struct {
 	SampleRate int32              `json:"sample_rate"`
 	Channels   int32              `json:"channels"`
 	StartFrame int64              `json:"start_frame"`
+	// FromCache (v4, optional) is true when the encrypted audio came from the
+	// on-disk audio cache instead of the network.
+	FromCache bool `json:"from_cache,omitempty"`
 }
 
 type errorResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
 	Code  string `json:"code"`
+	// RetryAfter (v4, optional) is the advised wait in seconds for rate_limited.
+	RetryAfter int `json:"retry_after,omitempty"`
 }
 
 // apiError carries a protocol error code.
@@ -122,9 +147,12 @@ func badRequest(msg string) error { return &apiError{code: CodeBadRequest, msg: 
 // codeFor maps an error to a protocol error code.
 func codeFor(err error) string {
 	var ae *apiError
+	var ce *spotifyx.CodedError
 	switch {
 	case errors.As(err, &ae):
 		return ae.code
+	case errors.As(err, &ce):
+		return ce.Code
 	case spotifyx.IsBadInput(err):
 		return CodeBadRequest
 	case errors.Is(err, spotifyx.ErrNotLoggedIn):

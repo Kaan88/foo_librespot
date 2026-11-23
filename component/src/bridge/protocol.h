@@ -20,6 +20,17 @@ struct bridge_status {
 	std::string state;      // "connecting", "connected" or "error"
 	std::string last_error; // reason of the last failed session creation
 	std::string version;
+	// Optional (v4): the account's product type ("premium", "free", ...) and
+	// the error code classifying last_error.
+	std::string product;
+	std::string last_error_code;
+};
+
+// Reply of the v4 `config` op: the audio cache as the bridge sees it.
+struct config_result {
+	int cache_mb = 0;          // limit in MiB, 0 = off
+	std::string cache_dir;
+	long long cache_bytes = 0; // size of the cached audio on disk
 };
 
 struct track_info {
@@ -53,9 +64,11 @@ struct track_info {
 
 // Error reply from the bridge; `code` is one of the protocol's error codes.
 struct bridge_error : std::runtime_error {
-	bridge_error(const std::string& message, const std::string& error_code)
-		: std::runtime_error(message), code(error_code) {}
+	bridge_error(const std::string& message, const std::string& error_code, int retry_seconds = 0)
+		: std::runtime_error(message), code(error_code), retry_after(retry_seconds) {}
 	std::string code;
+	// v4, rate_limited only: advised wait in seconds (0 = unknown).
+	int retry_after = 0;
 };
 
 // The context a resolve reply describes (album, playlist, Liked Songs), v2.
@@ -111,6 +124,8 @@ struct open_result {
 	int sample_rate = 44100;
 	int channels = 2;
 	long long start_frame = 0;
+	// v4: the encrypted audio came from the bridge's on-disk cache.
+	bool from_cache = false;
 	std::unique_ptr<pipe_stream> stream;
 };
 
@@ -164,6 +179,12 @@ public:
 	// v3: radio based on a track, artist, album or playlist (resolve-shaped reply).
 	resolve_result radio(const std::string& uri, const cancel_token& ct,
 		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// v4: applies the audio cache size (cache_mb >= 0; negative leaves it as
+	// is) and/or clears the cache, and returns the cache state. Old bridges
+	// answer bad_request ("unknown op").
+	config_result config(int cache_mb, bool clear_cache, const cancel_token& ct,
+		unsigned connect_timeout_ms = 1500, unsigned reply_timeout_ms = 30000);
 
 	// Sends one JSON request line and returns the parsed reply. Used by the
 	// console harness for the fake bridge's test-only ops; production code

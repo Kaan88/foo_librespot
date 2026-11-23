@@ -28,7 +28,14 @@ struct options_t {
 	bool realtime = false;
 	bool logged_out = false;
 	bool quiet = false;
+	int cache_mb = 0; // --cache-mb at spawn; changed by the config op
 } g_options;
+
+// Fake audio cache: URIs opened while the cache is on come "from cache" the
+// next time, so the component's handling of the v4 header field is testable.
+std::mutex g_cache_mutex;
+std::set<std::string> g_cached;
+
 
 void log_line(const char* text) {
 	if (!g_options.quiet) std::printf("[fake_bridge] %s\n", text);
@@ -198,8 +205,14 @@ std::string make_track(const std::string& uri, int index, int bitrate) {
 	out += ",\"cover_url\":\"\"";
 	out += ",\"track_gain_db\":-7.25";
 	out += ",\"track_peak\":0.9";
-	out += ",\"album_gain_db\":null";
-	out += ",\"album_peak\":null";
+	// Tracks whose URI mentions "album" carry album gain (-9.5 dB, peak 0.95).
+	if (uri.find("album") != std::string::npos) {
+		out += ",\"album_gain_db\":-9.5";
+		out += ",\"album_peak\":0.95";
+	} else {
+		out += ",\"album_gain_db\":null";
+		out += ",\"album_peak\":null";
+	}
 	out += ",\"playable\":true";
 	out += "}";
 	return out;
@@ -225,9 +238,28 @@ bool write_line(HANDLE pipe, const std::string& line) {
 	return write_all(pipe, withNewline.data(), withNewline.size());
 }
 
-std::string error_reply(const char* code, const char* message) {
-	return std::string("{\"ok\":false,\"error\":") + json_quote(message) + ",\"code\":" +
-		json_quote(code) + "}";
+std::string error_reply(const char* code, const char* message, int retry_after = 0) {
+	std::string out = std::string("{\"ok\":false,\"error\":") + json_quote(message) + ",\"code\":" +
+		json_quote(code);
+	if (retry_after > 0) out += ",\"retry_after\":" + std::to_string(retry_after);
+	return out + "}";
+}
+
+// Test-only: a URI containing errpremium / errrate / errregion / errgone makes
+// info and open fail with the matching v4 error code.
+bool write_uri_error(HANDLE pipe, const std::string& uri) {
+	if (uri.find("errpremium") != std::string::npos) {
+		write_line(pipe, error_reply("premium_required", "Spotify Premium is required"));
+	} else if (uri.find("errrate") != std::string::npos) {
+		write_line(pipe, error_reply("rate_limited", "Spotify is rate limiting requests", 42));
+	} else if (uri.find("errregion") != std::string::npos) {
+		write_line(pipe, error_reply("region_unavailable", "This track is not available in your country"));
+	} else if (uri.find("errgone") != std::string::npos) {
+		write_line(pipe, error_reply("track_unavailable", "This track is no longer available"));
+	} else {
+		return false;
+	}
+	return true;
 }
 
 bool read_request_line(HANDLE pipe, std::string& out) {
@@ -294,7 +326,7 @@ void handle_connection(HANDLE pipe) {
 		reply += g_options.logged_out ? "false" : "true";
 		reply += g_options.logged_out ? ",\"username\":\"\",\"country\":\"\""
 									  : ",\"username\":\"fake_user\",\"country\":\"TR\"";
-		reply += ",\"version\":\"0.1.0-fake\"}";
+		reply += ",\"version\":\"0.1.0-fake\",\"product\":\"premium\"}";
 		write_line(pipe, reply);
 		return;
 	}
@@ -306,7 +338,28 @@ void handle_connection(HANDLE pipe) {
 		return;
 	}
 
+	if (op == "config") {
+		std::lock_guard<std::mutex> lock(g_cache_mutex);
+		if (request.has("cache_mb")) {
+			g_options.cache_mb = static_cast<int>(request.get_int64("cache_mb"));
+			if (g_options.cache_mb <= 0) g_cached.clear();
+		}
+		if (request.get_bool("clear_cache", false)) g_cached.clear();
+		std::string reply = "{\"ok\":true,\"cache_mb\":" + std::to_string(g_options.cache_mb);
+		reply += ",\"cache_dir\":\"C:/fake/cache\"";
+		reply += ",\"cache_bytes\":" + std::to_string(static_cast<long long>(g_cached.size()) * 1000000);
+		reply += "}";
+		write_line(pipe, reply);
+		return;
+	}
+
 	if (op == "info") {
+		const flp::json::value* firstUris = request.find("uris");
+		if (firstUris != nullptr && firstUris->is_array()) {
+			for (const flp::json::value& item : firstUris->array) {
+				if (item.is_string() && write_uri_error(pipe, item.string)) return;
+			}
+		}
 		const int bitrate = static_cast<int>(request.get_int64("bitrate", 320));
 		const flp::json::value* uris = request.find("uris");
 		std::string reply = "{\"ok\":true,\"tracks\":[";
@@ -436,6 +489,12 @@ void handle_connection(HANDLE pipe) {
 	}
 
 	if (op == "open") {
+		if (write_uri_error(pipe, uri)) return;
+		bool fromCache = false;
+		{
+			std::lock_guard<std::mutex> lock(g_cache_mutex);
+			if (g_options.cache_mb > 0) fromCache = !g_cached.insert(uri).second;
+		}
 		const int bitrate = static_cast<int>(request.get_int64("bitrate", 320));
 		const long long startMs = request.get_int64("start_ms", 0);
 		const long long startFrame = static_cast<long long>(
@@ -445,6 +504,7 @@ void handle_connection(HANDLE pipe) {
 		header += ",\"sample_rate\":" + std::to_string(g_options.rate);
 		header += ",\"channels\":" + std::to_string(g_options.channels);
 		header += ",\"start_frame\":" + std::to_string(startFrame);
+		if (fromCache) header += ",\"from_cache\":true";
 		header += "}";
 		if (!write_line(pipe, header)) return;
 		stream_pcm(pipe, startFrame);
@@ -510,6 +570,8 @@ int wmain(int argc, wchar_t** argv) {
 			g_v2.track_count = _wtoi(argv[++i]);
 		} else if (arg == L"--quiet") {
 			g_options.quiet = true;
+		} else if (arg == L"--cache-mb" && i + 1 < argc) {
+			g_options.cache_mb = _wtoi(argv[++i]);
 		} else if (arg == L"--parent-pid" && i + 1 < argc) {
 			++i; // accepted and ignored
 		}

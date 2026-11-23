@@ -36,17 +36,18 @@ flp::cancel_token deadline_cancel(unsigned milliseconds) {
 }
 
 void print_status(const flp::bridge_status& status) {
-	std::printf("status ok=true logged_in=%s username=%s country=%s version=%s\n",
+	std::printf("status ok=true logged_in=%s username=%s country=%s version=%s product=%s\n",
 		status.logged_in ? "true" : "false", status.username.c_str(), status.country.c_str(),
-		status.version.c_str());
+		status.version.c_str(), status.product.c_str());
 }
 
 void print_track(const flp::track_info& track) {
 	std::printf("track uri=%s title=%s artists=%zu album=%s duration_ms=%lld bitrate=%d "
-				"gain=%s peak=%s album_uri=%s artist_uris=%zu\n",
+				"gain=%s peak=%s album_uri=%s artist_uris=%zu album_gain=%s album_peak=%s\n",
 		track.uri.c_str(), track.title.c_str(), track.artists.size(), track.album.c_str(),
 		track.duration_ms, track.bitrate, track.has_track_gain ? "yes" : "no",
-		track.has_track_peak ? "yes" : "no", track.album_uri.c_str(), track.artist_uris.size());
+		track.has_track_peak ? "yes" : "no", track.album_uri.c_str(), track.artist_uris.size(),
+		track.has_album_gain ? "yes" : "no", track.has_album_peak ? "yes" : "no");
 }
 
 void print_item(const flp::library_item& item) {
@@ -170,8 +171,10 @@ int run_play(flp::bridge_client& client, const std::string& uri, int startMs, lo
 	flp::open_result opened =
 		client.open(uri, startMs, 320, deadline_cancel(abortAfterMs));
 
-	std::printf("header rate=%d channels=%d start_frame=%lld title=%s\n", opened.sample_rate,
-		opened.channels, opened.start_frame, opened.track.title.c_str());
+	std::printf("header rate=%d channels=%d start_frame=%lld title=%s from_cache=%s "
+				"album_gain=%s\n", opened.sample_rate, opened.channels, opened.start_frame,
+		opened.track.title.c_str(), opened.from_cache ? "yes" : "no",
+		opened.track.has_album_gain ? "yes" : "no");
 	if (expectStartFrame >= 0 && opened.start_frame != expectStartFrame) {
 		std::printf("FAIL expected start_frame %lld, got %lld\n", expectStartFrame,
 			opened.start_frame);
@@ -264,8 +267,16 @@ int run_play(flp::bridge_client& client, const std::string& uri, int startMs, lo
 	return 0;
 }
 
-int run_spawn(const std::wstring& directory, const std::wstring& pipeName) {
+int run_config(flp::bridge_client& client, int cacheMb, bool clear) {
+	const flp::config_result result = client.config(cacheMb, clear, never_cancel());
+	std::printf("config cache_mb=%d cache_dir=%s cache_bytes=%lld\n", result.cache_mb,
+		result.cache_dir.c_str(), result.cache_bytes);
+	return 0;
+}
+
+int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int cacheMb) {
 	flp::bridge_process process(pipeName);
+	process.set_cache_mb(cacheMb);
 	process.set_exe_path(directory + L"\\librespot-bridge.exe");
 	const auto start = std::chrono::steady_clock::now();
 	process.ensure_running(never_cancel(), 12000);
@@ -275,6 +286,7 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName) {
 
 	flp::bridge_client client(pipeName);
 	print_status(client.status(never_cancel()));
+	if (cacheMb >= 0) return run_config(client, -1, false);
 	return 0;
 }
 
@@ -312,12 +324,29 @@ int main(int argc, char** argv) {
 				return 2;
 			}
 			const std::string directory = arguments[1];
-			return run_spawn(std::wstring(directory.begin(), directory.end()), widePipe);
+			int spawnCacheMb = -1;
+			if (arguments.size() >= 4 && arguments[2] == "--cache-mb") {
+				spawnCacheMb = std::atoi(arguments[3].c_str());
+			}
+			return run_spawn(std::wstring(directory.begin(), directory.end()), widePipe, spawnCacheMb);
 		}
 
 		flp::bridge_client client(widePipe);
 
 		if (mode == "status") return run_status(client);
+
+		if (mode == "config") {
+			int cacheMb = -1;
+			bool clear = false;
+			for (size_t i = 1; i < arguments.size(); ++i) {
+				if (arguments[i] == "--cache-mb" && i + 1 < arguments.size()) {
+					cacheMb = std::atoi(arguments[++i].c_str());
+				} else if (arguments[i] == "--clear") {
+					clear = true;
+				}
+			}
+			return run_config(client, cacheMb, clear);
+		}
 
 		if (mode == "info") {
 			int bitrate = 0;
@@ -439,7 +468,8 @@ int main(int argc, char** argv) {
 		usage();
 		return 2;
 	} catch (const flp::bridge_error& error) {
-		std::printf("bridge error code=%s message=%s\n", error.code.c_str(), error.what());
+		std::printf("bridge error code=%s retry_after=%d message=%s\n", error.code.c_str(),
+			error.retry_after, error.what());
 		return 1;
 	} catch (const flp::cancelled&) {
 		std::printf("cancelled\n");

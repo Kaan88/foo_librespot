@@ -8,7 +8,7 @@ namespace {
 [[noreturn]] void raise_error(const json::value& reply) {
 	const std::string message = reply.get_string("error", "unknown librespot bridge error");
 	const std::string code = reply.get_string("code");
-	throw bridge_error(message, code);
+	throw bridge_error(message, code, static_cast<int>(reply.get_int64("retry_after", 0)));
 }
 
 void require_ok(const json::value& reply) {
@@ -156,6 +156,8 @@ bridge_status bridge_client::status(const cancel_token& ct, unsigned connect_tim
 	out.state = reply.get_string("state");
 	out.last_error = reply.get_string("last_error");
 	out.version = reply.get_string("version");
+	out.product = reply.get_string("product");
+	out.last_error_code = reply.get_string("last_error_code");
 	return out;
 }
 
@@ -289,6 +291,20 @@ resolve_result bridge_client::radio(const std::string& uri, const cancel_token& 
 	return out;
 }
 
+config_result bridge_client::config(int cache_mb, bool clear_cache, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	std::string payload = "{\"op\":\"config\"";
+	if (cache_mb >= 0) payload += ",\"cache_mb\":" + std::to_string(cache_mb);
+	if (clear_cache) payload += ",\"clear_cache\":true";
+	payload += "}";
+	const json::value reply = request(payload, ct, connect_timeout_ms, reply_timeout_ms);
+	config_result out;
+	out.cache_mb = static_cast<int>(reply.get_int64("cache_mb", 0));
+	out.cache_dir = reply.get_string("cache_dir");
+	out.cache_bytes = reply.get_int64("cache_bytes", 0);
+	return out;
+}
+
 json::value bridge_client::raw_request(const std::string& payload, const cancel_token& ct,
 	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
 	return request(payload, ct, connect_timeout_ms, reply_timeout_ms);
@@ -319,6 +335,7 @@ open_result bridge_client::open(const std::string& uri, long long start_ms, int 
 	out.sample_rate = static_cast<int>(header.get_int64("sample_rate", 44100));
 	out.channels = static_cast<int>(header.get_int64("channels", 2));
 	out.start_frame = header.get_int64("start_frame", 0);
+	out.from_cache = header.get_bool("from_cache", false);
 	out.stream = std::move(pipe);
 	return out;
 }

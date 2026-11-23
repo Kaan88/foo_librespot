@@ -24,7 +24,7 @@ import (
 )
 
 const usage = `Usage:
-  librespot-bridge.exe [--pipe <name>] [--parent-pid <pid>] [--debug]
+  librespot-bridge.exe [--pipe <name>] [--parent-pid <pid>] [--cache-mb <n>] [--debug]
   librespot-bridge.exe login
 
 Commands:
@@ -34,6 +34,11 @@ Commands:
 Flags:
   --pipe <name>        Named pipe to serve on (default foo_librespot).
   --parent-pid <pid>   Exit when the given process exits.
+  --cache-mb <n>       Audio cache limit in MiB (0 = off, the default; the
+                       component passes its setting). Can be changed while
+                       running with the "config" op.
+  --cache-dir <dir>    Audio cache folder (default
+                       %LOCALAPPDATA%oo_librespot\cache).
   --debug              Log debug output to %APPDATA%\foo_librespot\bridge.log.
   --version            Print the version and exit.
 `
@@ -58,6 +63,8 @@ func run(args []string) int {
 	pipeName := fs.String("pipe", "foo_librespot", "named pipe to serve on")
 	parentPID := fs.Int("parent-pid", 0, "exit when this process id exits")
 	debug := fs.Bool("debug", false, "log debug output")
+	cacheMB := fs.Int("cache-mb", 0, "audio cache limit in MiB (0 = off)")
+	cacheDir := fs.String("cache-dir", "", "audio cache folder")
 	version := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -107,6 +114,17 @@ func run(args []string) int {
 	// The session starts connecting right away, in the background: the first
 	// status and the first request then already have something to report.
 	mgr := spotifyx.NewManager(ctx, log)
+	dir := *cacheDir
+	if dir == "" {
+		dir = defaultCacheDir()
+	}
+	mgr.SetCacheDir(dir)
+	if *cacheMB < 0 {
+		*cacheMB = 0
+	}
+	if err := mgr.ConfigureCache(*cacheMB); err != nil {
+		log.WithError(err).Warnf("audio cache disabled")
+	}
 	mgr.Start()
 	defer mgr.Close()
 
@@ -152,6 +170,20 @@ func runLogin(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// defaultCacheDir is %LOCALAPPDATA%oo_librespot\cache.
+func defaultCacheDir() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		if dir, err := os.UserCacheDir(); err == nil {
+			base = dir
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "foo_librespot", "cache")
 }
 
 // openLog opens %APPDATA%\foo_librespot\bridge.log.

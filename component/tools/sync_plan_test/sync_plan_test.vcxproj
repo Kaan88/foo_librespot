@@ -58,6 +58,7 @@
     <ClCompile Include="sync_plan_test.cpp" />
     <ClCompile Include="..\..\src\sync_plan.cpp" />
     <ClCompile Include="..\..\src\spotify_links.cpp" />
+    <ClCompile Include="..\..\src\error_policy.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

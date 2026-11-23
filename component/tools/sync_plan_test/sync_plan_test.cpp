@@ -4,6 +4,7 @@
 // result equals the new URI list, which validates the remove -> reorder ->
 // insert semantics used by spotify_playlists.cpp.
 
+#include "../../src/error_policy.h"
 #include "../../src/spotify_links.h"
 #include "../../src/sync_plan.h"
 
@@ -206,6 +207,53 @@ void test_links() {
 	check(flp::spotify_web_url("nope").empty(), "web URL of a non-Spotify string is empty");
 }
 
+void test_error_policy() {
+	using flp::describe_error;
+	const auto kind = [](const char* code, const char* detail = "x", int retry = 0) {
+		return describe_error(code, detail, retry);
+	};
+
+	const flp::error_info premium = kind("premium_required");
+	check(premium.kind == "premium_required" && premium.popup && !premium.skip_track,
+		"premium_required: popup, does not skip");
+	check(premium.message.find("Premium") != std::string::npos, "premium_required message mentions Premium");
+
+	const flp::error_info limited = kind("rate_limited", "x", 42);
+	check(limited.kind == "rate_limited" && !limited.skip_track, "rate_limited: does not skip");
+	check(limited.message.find("42 s") != std::string::npos, "rate_limited message carries retry-after");
+	check(kind("rate_limited").message.find("in a minute") != std::string::npos,
+		"rate_limited without retry-after says a minute");
+
+	const flp::error_info region = kind("region_unavailable");
+	check(region.skip_track && region.popup && region.message.find("country") != std::string::npos,
+		"region_unavailable: skip the track, mention the country");
+	const flp::error_info gone = kind("track_unavailable");
+	check(gone.skip_track && gone.popup && gone.message.find("no longer available") != std::string::npos,
+		"track_unavailable: skip the track");
+
+	check(kind("not_logged_in").kind == "not_logged_in" && !kind("not_logged_in").skip_track,
+		"not_logged_in keeps its message and does not skip");
+	const flp::error_info connecting = describe_error("unavailable",
+		"connecting to Spotify failed: dial tcp: i/o timeout", 0);
+	check(connecting.kind == "connecting" && connecting.message.find("dial tcp") != std::string::npos &&
+			!connecting.skip_track && !connecting.popup,
+		"connecting failure keeps its reason (no popup, no skip)");
+	const flp::error_info other = describe_error("internal", "boom", 0);
+	check(other.kind == "other" && other.message == "Spotify: boom" && !other.skip_track,
+		"unknown codes pass the bridge message through");
+	check(describe_error("unavailable", "x", 0).kind == "other", "old 'unavailable' stays generic");
+
+	const flp::bridge_error error("whatever", "region_unavailable", 0);
+	check(describe_error(error).skip_track, "bridge_error maps by its code");
+	check(describe_error(std::runtime_error("pipe broke")).message == "Spotify: pipe broke",
+		"non-bridge errors are generic");
+
+	flp::reset_reported_kinds();
+	check(flp::first_report_of_kind("region_unavailable"), "first report of a kind raises a popup");
+	check(!flp::first_report_of_kind("region_unavailable"), "the same kind again does not");
+	check(flp::first_report_of_kind("premium_required"), "another kind does");
+}
+
 } // namespace
 
 int main() {
@@ -219,6 +267,7 @@ int main() {
 	test_ignores_invalid_protect_index();
 	test_insert_runs();
 	test_links();
+	test_error_policy();
 
 	if (g_failures != 0) {
 		std::printf("%d sync plan test(s) FAILED\n", g_failures);

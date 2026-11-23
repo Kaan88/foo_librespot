@@ -32,6 +32,7 @@ const usage = `Usage:
   bridgectl [--pipe <name>] save <track-uri>...
   bridgectl [--pipe <name>] unsave <track-uri>...
   bridgectl [--pipe <name>] playlist-add <playlist-uri> <track-uri>... [--dry-run]
+  bridgectl [--pipe <name>] config [--cache-mb N] [--clear-cache]
   bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
   bridgectl [--pipe <name>] open-to-wav <uri-or-url> <out.wav> [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 
@@ -57,6 +58,8 @@ type header struct {
 	SampleRate int32           `json:"sample_rate"`
 	Channels   int32           `json:"channels"`
 	StartFrame int64           `json:"start_frame"`
+	FromCache  bool            `json:"from_cache"`
+	RetryAfter int             `json:"retry_after"`
 }
 
 func main() {
@@ -120,10 +123,30 @@ func run(args []string) int {
 		return doJSON(*pipe, map[string]any{"op": "radio", "uri": rest[1]})
 	case "open-to-wav":
 		return doOpen(*pipe, rest[1:])
+	case "config":
+		return doConfig(*pipe, rest[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "bridgectl: unknown command %q\n\n%s", rest[0], usage)
 		return 2
 	}
+}
+
+// doConfig sends the config op: `config [--cache-mb N] [--clear-cache]`.
+func doConfig(pipe string, args []string) int {
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	cacheMB := fs.Int("cache-mb", -1, "audio cache limit in MiB (0 = off)")
+	clear := fs.Bool("clear-cache", false, "delete the cached audio")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	req := map[string]any{"op": "config"}
+	if *cacheMB >= 0 {
+		req["cache_mb"] = *cacheMB
+	}
+	if *clear {
+		req["clear_cache"] = true
+	}
+	return doJSON(pipe, req)
 }
 
 func doInfo(pipe string, args []string) int {
@@ -283,6 +306,7 @@ func doOpen(pipe string, args []string) int {
 	}
 	defer conn.Close()
 
+	began := time.Now()
 	req, _ := json.Marshal(map[string]any{
 		"op":       "open",
 		"uri":      uri,
@@ -307,11 +331,12 @@ func doOpen(pipe string, args []string) int {
 		return 1
 	}
 	if !hdr.OK {
-		fmt.Fprintf(os.Stderr, "bridgectl: open failed (%s): %s\n", hdr.Code, hdr.Error)
+		fmt.Fprintf(os.Stderr, "bridgectl: open failed (%s, retry_after %d): %s\n", hdr.Code, hdr.RetryAfter, hdr.Error)
 		return 1
 	}
 
 	fmt.Printf("uri:         %s\n", uri)
+	fmt.Printf("header in:   %s, from_cache: %v\n", time.Since(began).Round(time.Millisecond), hdr.FromCache)
 	fmt.Printf("start_frame: %d (%.3f ms)\n", hdr.StartFrame, float64(hdr.StartFrame)/44.1)
 	fmt.Printf("sample_rate: %d, channels: %d\n", hdr.SampleRate, hdr.Channels)
 	var pretty bytes.Buffer

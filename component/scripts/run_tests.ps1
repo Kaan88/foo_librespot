@@ -55,6 +55,16 @@ function Wait-Pipe([string]$PipeName, [int]$TimeoutMs = 10000) {
     throw "pipe $PipeName did not become ready"
 }
 
+
+# Stops only the bridges this script spawned: the fake copied to librespot-bridge.exe
+# runs with a --pipe name starting with foo_librespot_spawn. Never stop by image name,
+# the user's foobar2000 runs its own librespot-bridge.exe.
+function Stop-TestBridges {
+    Get-CimInstance Win32_Process -Filter "Name = 'librespot-bridge.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match '--pipe foo_librespot_spawn' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
 $started = @()
 try {
     # --- normal fake bridge ------------------------------------------------
@@ -154,6 +164,41 @@ try {
     Assert ($r.Output -match "start_frame=44100") "seek header start_frame is sample-accurate"
     Assert ($r.Output -match "frames=44100") "seek delivers the remaining 1 s"
 
+    # --- protocol v4: error codes, config/cache, album gain ----------------
+    $r = Invoke-Probe @("--pipe", $normalPipe, "status")
+    Assert ($r.Output -match "product=premium") "status carries the optional product"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "info", "spotify:track:errpremium00000000000")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=premium_required") "premium_required error code"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "info", "spotify:track:errrate000000000000000")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=rate_limited retry_after=42") "rate_limited carries retry_after"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:errregion0000000000000")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=region_unavailable") "region_unavailable on open"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:errgone00000000000000")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=track_unavailable") "track_unavailable on open"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "info", "spotify:track:albumgain0000000000000")
+    Assert ($r.Output -match "album_gain=yes album_peak=yes") "info carries album gain and peak"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "info", "spotify:track:0123456789abcdefghijkl")
+    Assert ($r.Output -match "album_gain=no album_peak=no") "missing album gain stays absent"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "config")
+    Assert ($r.Code -eq 0 -and $r.Output -match "config cache_mb=0 ") "config reports the cache state"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:albumgain0000000000000", "--frames", "4096")
+    Assert ($r.Output -match "from_cache=no album_gain=yes") "open header: album gain, cache off -> not from cache"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "config", "--cache-mb", "1024")
+    Assert ($r.Code -eq 0 -and $r.Output -match "config cache_mb=1024 ") "config applies the cache size live"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:albumgain0000000000000", "--frames", "4096")
+    Assert ($r.Output -match "from_cache=no ") "first open with the cache on comes from the network"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:albumgain0000000000000", "--frames", "4096")
+    Assert ($r.Output -match "from_cache=yes ") "second open reports from_cache"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "config", "--clear")
+    Assert ($r.Output -match "cache_bytes=0") "clear_cache empties the cache"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "play", "spotify:track:albumgain0000000000000", "--frames", "4096")
+    Assert ($r.Output -match "from_cache=no ") "after clearing, the next open is a miss"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "config", "--cache-mb", "0")
+    Assert ($r.Output -match "config cache_mb=0 ") "cache can be turned off live"
+
     # --- abort test (real-time stream) ------------------------------------
     $realtimePipe = "foo_librespot_rt"
     $started += Start-Process -FilePath $fake `
@@ -187,6 +232,12 @@ try {
     # --- metadata mapping (SDK file_info, no host) -------------------------
     $sharedDll = Join-Path $Foobar2000Dir "shared.dll"
     if (Test-Path $sharedDll) {
+        # The probe must match the architecture of the foobar2000 install it borrows
+        # shared.dll from (the portable install may be 32-bit or 64-bit).
+        $dllBytes = [IO.File]::ReadAllBytes($sharedDll)
+        $machine = [BitConverter]::ToUInt16($dllBytes, [BitConverter]::ToInt32($dllBytes, 0x3c) + 4)
+        $arch = if ($machine -eq 0x8664) { "x64" } else { "Win32" }
+        $metadataProbe = Join-Path $componentDir "build\tools\$Configuration\$arch\metadata_probe.exe"
         Copy-Item $sharedDll (Split-Path $metadataProbe) -Force
         $metadataOutput = & $metadataProbe 2>&1 | Out-String
         $metadataCode = $LASTEXITCODE
@@ -211,7 +262,12 @@ try {
     $r = Invoke-Probe @("--pipe", $spawnPipe, "spawn", $spawnDir)
     Assert ($r.Code -eq 0 -and $r.Output -match "spawn ok") "bridge_process starts librespot-bridge.exe"
     Assert ($r.Output -match "logged_in=true") "spawned bridge answers status"
-    Get-Process -Name "librespot-bridge" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+    # The cache size reaches a spawned bridge as --cache-mb.
+    Stop-TestBridges
+    $r = Invoke-Probe @("--pipe", "foo_librespot_spawn2", "spawn", $spawnDir, "--cache-mb", "512")
+    Assert ($r.Code -eq 0 -and $r.Output -match "config cache_mb=512 ") "spawned bridge receives --cache-mb"
+    Stop-TestBridges
 
     # --- Python fake bridge ------------------------------------------------
     $pythonCandidates = @(
@@ -263,7 +319,7 @@ try {
     foreach ($process in $started) {
         if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
     }
-    Get-Process -Name "librespot-bridge" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-TestBridges
 }
 
 if ($failures -ne 0) {

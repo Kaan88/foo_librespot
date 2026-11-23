@@ -2,10 +2,14 @@
 #include "component_helpers.h"
 
 #include "bridge/process.h"
+#include "config.h"
+#include "error_policy.h"
 
 #include <SDK/console.h>
 #include <SDK/core_api.h>
+#include <SDK/popup_message.h>
 
+#include <filesystem>
 #include <mutex>
 
 #ifndef NOMINMAX
@@ -54,7 +58,70 @@ std::wstring bridge_exe_near_component() {
 
 void init_bridge_paths() {
 	static std::once_flag once;
-	std::call_once(once, [] { bridge_process::instance().set_exe_path(bridge_exe_near_component()); });
+	std::call_once(once, [] {
+		bridge_process::instance().set_exe_path(bridge_exe_near_component());
+		// A bridge spawned from now on starts with the configured audio cache.
+		bridge_process::instance().set_cache_mb(effective_cache_mb());
+	});
+}
+
+bool apply_cache_setting(int cache_mb, bool clear_cache, config_result& out, std::string& error) {
+	init_bridge_paths();
+	if (cache_mb >= 0) bridge_process::instance().set_cache_mb(cache_mb);
+	if (!bridge_process::instance().pipe_reachable(0)) {
+		// No bridge running: the next spawn gets --cache-mb, so only the
+		// clearing is left, which works on the folder directly.
+		return false;
+	}
+	try {
+		bridge_client client;
+		out = client.config(cache_mb, clear_cache, cancel_token(), 1500, 30000);
+		return true;
+	} catch (const std::exception& failure) {
+		// An older bridge does not know the op; it keeps its old setting until
+		// it restarts.
+		error = failure.what();
+		return false;
+	}
+}
+
+std::string default_cache_dir() {
+	wchar_t buffer[MAX_PATH * 2] = {};
+	const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer,
+		static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])));
+	if (length == 0 || length >= sizeof(buffer) / sizeof(buffer[0])) return std::string();
+	return utf8_from_wide(std::wstring(buffer, length) + L"\\foo_librespot\\cache");
+}
+
+long long cache_folder_bytes(const std::string& cache_dir) {
+	if (cache_dir.empty()) return 0;
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	long long total = 0;
+	fs::recursive_directory_iterator it(fs::path(wide_from_utf8(cache_dir)) / L"audio",
+		fs::directory_options::skip_permission_denied, ec);
+	for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+		std::error_code fileError;
+		if (it->is_regular_file(fileError)) {
+			const auto size = it->file_size(fileError);
+			if (!fileError) total += static_cast<long long>(size);
+		}
+	}
+	return total;
+}
+
+bool clear_cache_folder(const std::string& cache_dir, std::string& error) {
+	if (cache_dir.empty()) return true;
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	const fs::path audio = fs::path(wide_from_utf8(cache_dir)) / L"audio";
+	if (!fs::exists(audio, ec)) return true;
+	fs::remove_all(audio, ec);
+	if (ec) {
+		error = ec.message();
+		return false;
+	}
+	return true;
 }
 
 cancel_token make_cancel(abort_callback& aborter) {
@@ -75,30 +142,58 @@ void ensure_bridge_started(abort_callback& aborter) {
 }
 
 std::string user_error_message(const std::exception& error) {
-	const auto* failure = dynamic_cast<const bridge_error*>(&error);
-	if (failure != nullptr && failure->code == "not_logged_in") {
-		return "Spotify: not logged in \xE2\x80\x94 Preferences > Tools > foo_librespot";
-	}
-
-	const std::string detail = error.what();
-	// The bridge reports a failed session as "connecting to Spotify failed:
-	// <reason>"; show it the way foobar2000 users expect to read it.
-	const std::string connectPrefix = "connecting to Spotify failed: ";
-	if (detail.compare(0, connectPrefix.size(), connectPrefix) == 0) {
-		return "Spotify: connecting failed \xE2\x80\x94 " + detail.substr(connectPrefix.size());
-	}
-	return "Spotify: " + detail;
+	return describe_error(error).message;
 }
 
-void throw_io_error(const std::exception& error) {
-	const auto* bridgeFailure = dynamic_cast<const bridge_error*>(&error);
-	if (bridgeFailure != nullptr && !bridgeFailure->code.empty()) {
-		console::print("foo_librespot: ", error.what(), " (code: ", bridgeFailure->code.c_str(), ")");
-	} else {
-		console::print("foo_librespot: ", error.what());
-	}
+namespace {
 
-	throw exception_io_denied(user_error_message(error).c_str());
+void print_error(const std::exception& error, const char* track) {
+	const auto* bridgeFailure = dynamic_cast<const bridge_error*>(&error);
+	const std::string shown = describe_error(error).message;
+	pfc::string_formatter text;
+	text << "foo_librespot: ";
+	if (track != nullptr) text << track << ": ";
+	text << shown.c_str();
+	if (shown.find(error.what()) == std::string::npos) text << " [" << error.what() << "]";
+	if (bridgeFailure != nullptr && !bridgeFailure->code.empty()) {
+		text << " (code: " << bridgeFailure->code.c_str() << ")";
+	}
+	console::print(text);
+}
+
+[[noreturn]] void throw_for(const error_info& info) {
+	// A track that cannot be played gets the exception foobar2000 handles as a
+	// per-item failure ("Object not found"), so playback can go on with the next
+	// item; everything else (login, Premium, rate limit, connection) is not
+	// about this one track and is reported as a denied access.
+	if (info.skip_track) throw exception_io_not_found(info.message.c_str());
+	throw exception_io_denied(info.message.c_str());
+}
+
+} // namespace
+
+void throw_io_error(const std::exception& error) {
+	print_error(error, nullptr);
+	throw_for(describe_error(error));
+}
+
+void throw_track_error(const std::exception& error, const char* track) {
+	print_error(error, track);
+	const error_info info = describe_error(error);
+	// One popup per kind and session: a playlist of unavailable tracks must
+	// not raise one dialog per track. The console line above is per track.
+	if (info.popup && first_report_of_kind(info.kind)) {
+		const std::string message = info.message;
+		fb2k::inMainThread([message] {
+			popup_message::g_show(message.c_str(), "foo_librespot", popup_message::icon_error);
+		});
+	}
+	throw_for(info);
+}
+
+void throw_unplayable(const char* track) {
+	const bridge_error error("This track is no longer available on Spotify", "track_unavailable");
+	throw_track_error(error, track);
 }
 
 bool is_spotify_track_path(const char* path) {

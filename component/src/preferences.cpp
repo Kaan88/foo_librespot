@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -49,6 +50,7 @@ public:
 		if (selected_interval() != flp::effective_sync_interval_minutes()) {
 			state |= preferences_state::changed;
 		}
+		if (selected_cache_mb() != flp::effective_cache_mb()) state |= preferences_state::changed;
 		if (effective_prefix_text() != flp::effective_playlist_prefix()) {
 			state |= preferences_state::changed;
 		}
@@ -60,6 +62,7 @@ public:
 	void apply() override {
 		flp::cfg_bitrate_kbps.set(selected_bitrate());
 		flp::cfg_sync_interval_minutes.set(selected_interval());
+		apply_cache_selection();
 		std::string prefix = effective_prefix_text();
 		flp::cfg_playlist_prefix.set(prefix.c_str());
 		SetDlgItemTextW(m_wnd, IDC_PREFIX, flp::wide_from_utf8(prefix).c_str());
@@ -70,6 +73,7 @@ public:
 	void reset() override {
 		set_bitrate_selection(flp::kDefaultBitrateKbps);
 		set_interval_selection(flp::kDefaultSyncIntervalMinutes);
+		set_cache_selection(flp::kDefaultCacheMb);
 		SetDlgItemTextW(m_wnd, IDC_PREFIX, flp::wide_from_utf8(flp::kDefaultPlaylistPrefix).c_str());
 		m_callback->on_state_changed();
 	}
@@ -100,10 +104,12 @@ private:
 		set_bitrate_selection(flp::effective_bitrate_kbps());
 
 		build_sync_choices();
+		build_cache_choices();
 		SetDlgItemTextW(m_wnd, IDC_PREFIX,
 			flp::wide_from_utf8(flp::effective_playlist_prefix()).c_str());
 
 		refresh_status();
+		refresh_cache_info();
 	}
 
 	void build_sync_choices() {
@@ -136,6 +142,120 @@ private:
 		set_interval_selection(current);
 	}
 
+	void build_cache_choices() {
+		m_cacheValues = { 0, 256, 512, 1024, 2048, 5120, 10240 };
+		const int current = flp::effective_cache_mb();
+		if (std::find(m_cacheValues.begin(), m_cacheValues.end(), current) == m_cacheValues.end()) {
+			m_cacheValues.push_back(current);
+			std::sort(m_cacheValues.begin(), m_cacheValues.end());
+		}
+		for (const int mb : m_cacheValues) {
+			std::wstring label;
+			if (mb == 0) {
+				label = L"Off";
+			} else if (mb == flp::kDefaultCacheMb) {
+				label = L"1 GB (default)";
+			} else if (mb % 1024 == 0) {
+				label = std::to_wstring(mb / 1024) + L" GB";
+			} else {
+				label = std::to_wstring(mb) + L" MB";
+			}
+			SendDlgItemMessageW(m_wnd, IDC_CACHE, CB_ADDSTRING, 0,
+				reinterpret_cast<LPARAM>(label.c_str()));
+		}
+		set_cache_selection(current);
+	}
+
+	void set_cache_selection(int mb) {
+		LRESULT index = 0;
+		for (size_t i = 0; i < m_cacheValues.size(); ++i) {
+			if (m_cacheValues[i] == mb) {
+				index = static_cast<LRESULT>(i);
+				break;
+			}
+		}
+		SendDlgItemMessageW(m_wnd, IDC_CACHE, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
+	}
+
+	int selected_cache_mb() const {
+		const LRESULT index = SendDlgItemMessageW(m_wnd, IDC_CACHE, CB_GETCURSEL, 0, 0);
+		if (index < 0 || static_cast<size_t>(index) >= m_cacheValues.size()) {
+			return flp::kDefaultCacheMb;
+		}
+		return m_cacheValues[static_cast<size_t>(index)];
+	}
+
+	// Saves the cache size and hands it to the bridge: a running bridge applies
+	// it live through the `config` op, a bridge started later gets --cache-mb.
+	void apply_cache_selection() {
+		const int mb = selected_cache_mb();
+		flp::cfg_cache_mb.set(static_cast<t_uint32>(mb));
+		fb2k::splitTask([mb] {
+			flp::config_result result;
+			std::string error;
+			flp::apply_cache_setting(mb, false, result, error);
+		});
+		refresh_cache_info();
+	}
+
+	void on_clear_cache() {
+		set_cache_info_text("Clearing the cache...");
+		const std::shared_ptr<status_state> state = m_status;
+		fb2k::splitTask([state] {
+			flp::config_result result;
+			std::string error;
+			std::string text;
+			const std::string dir = flp::default_cache_dir();
+			// A running bridge clears through its own bookkeeping; with none
+			// running (or an old one) the folder is emptied directly.
+			bool done = flp::apply_cache_setting(-1, true, result, error);
+			if (!done) {
+				std::string folderError;
+				done = flp::clear_cache_folder(dir, folderError);
+				if (!done) error = folderError;
+			}
+			if (done) {
+				text = "Cache cleared.";
+			} else {
+				text = "Some cached files could not be deleted (in use?): " + error;
+			}
+			fb2k::inMainThread([state, text] {
+				HWND target = state->target.load();
+				if (target == nullptr || !IsWindow(target)) return;
+				SetDlgItemTextW(target, IDC_CACHE_INFO, flp::wide_from_utf8(text).c_str());
+			});
+		});
+	}
+
+	void set_cache_info_text(const std::string& text) {
+		if (m_wnd == nullptr) return;
+		SetDlgItemTextW(m_wnd, IDC_CACHE_INFO, flp::wide_from_utf8(text).c_str());
+	}
+
+	void refresh_cache_info() {
+		if (m_wnd == nullptr) return;
+		const std::shared_ptr<status_state> state = m_status;
+		fb2k::splitTask([state] {
+			flp::config_result result;
+			std::string error;
+			long long bytes = 0;
+			if (flp::bridge_process::instance().pipe_reachable(0) &&
+				flp::apply_cache_setting(-1, false, result, error)) {
+				bytes = result.cache_bytes;
+			} else {
+				bytes = flp::cache_folder_bytes(flp::default_cache_dir());
+			}
+			char buffer[96];
+			std::snprintf(buffer, sizeof(buffer), "%.1f MB cached", static_cast<double>(bytes) / (1024.0 * 1024.0));
+			const std::string text = buffer;
+			fb2k::inMainThread([state, text] {
+				HWND target = state->target.load();
+				if (target == nullptr || !IsWindow(target)) return;
+				SetDlgItemTextW(target, IDC_CACHE_INFO, flp::wide_from_utf8(text).c_str());
+			});
+		});
+	}
+
 	INT_PTR on_message(HWND wnd, UINT message, WPARAM wparam, LPARAM) {
 		switch (message) {
 		case WM_COMMAND:
@@ -151,6 +271,12 @@ private:
 				return TRUE;
 			case IDC_SYNC:
 				if (HIWORD(wparam) == CBN_SELCHANGE) m_callback->on_state_changed();
+				return TRUE;
+			case IDC_CACHE:
+				if (HIWORD(wparam) == CBN_SELCHANGE) m_callback->on_state_changed();
+				return TRUE;
+			case IDC_CACHE_CLEAR:
+				if (HIWORD(wparam) == BN_CLICKED) on_clear_cache();
 				return TRUE;
 			case IDC_PREFIX:
 				if (HIWORD(wparam) == EN_CHANGE) m_callback->on_state_changed();
@@ -282,6 +408,7 @@ private:
 	preferences_page_callback::ptr m_callback;
 	HWND m_wnd = nullptr;
 	std::vector<int> m_syncValues;
+	std::vector<int> m_cacheValues;
 	std::shared_ptr<status_state> m_status = std::make_shared<status_state>();
 };
 

@@ -63,9 +63,13 @@ go test -ldflags "-linkmode external -extldflags -static" ./...
 ## Running the bridge
 
 ```text
-librespot-bridge.exe [--pipe <name>] [--parent-pid <pid>] [--debug]
+librespot-bridge.exe [--pipe <name>] [--parent-pid <pid>] [--cache-mb <n>] [--cache-dir <dir>] [--debug]
 librespot-bridge.exe login
 ```
+
+- `--cache-mb` (default 0 = off) — size limit of the persistent audio cache in
+  MiB; `--cache-dir` (default `%LOCALAPPDATA%\foo_librespot\cache`). See
+  "Phase 5" below.
 
 - `--pipe` (default `foo_librespot`) — named pipe, `\.\pipe\<name>`, byte mode,
   many concurrent connections, one goroutine per connection. The default pipe
@@ -217,6 +221,45 @@ All through spclient (the public Web API answers 429 for this login's token):
   wins and is logged (`radio for ...: N tracks via ...`).
 - `library` playlist items carry `editable`; `track_info` carries `album_uri`
   and `artist_uris`.
+
+### Phase 5: audio cache, error codes, album gain
+
+**Audio cache.** `player.Options.Cache` takes a `cache.Cache` (go-librespot's
+`cache` package): encrypted audio files by file id, LRU eviction at the size
+limit, written atomically once a file has been fully downloaded (a track skipped
+half way is not cached). The manager builds it from `--cache-mb` / `--cache-dir`,
+and the `config` op can change it while the bridge runs: it makes a new
+`player.Player` with the new cache and swaps it into the current session
+generation (under the write lock every request holds for reading); the old
+player is closed, streams already open keep decoding from what they hold,
+nothing reconnects. `config` with `clear_cache` runs a GC first (a closed stream
+keeps its cache file open until the Go finalizer runs, and Windows cannot delete
+open files), deletes the files and rebuilds the cache so its size accounting
+restarts from what is left. Whether an `open` came from the cache is detected
+from the library's own "using cached audio file" debug line (counted by a logger
+wrapper around the player's log; `NewStream` is serialised) and reported as
+`from_cache` plus a log line `opened <uri> at <ms> ms from cache|network in <time>`.
+`bridgectl config [--cache-mb N] [--clear-cache]` drives it.
+
+**Errors.** `spotifyx.Classify` maps library errors to protocol codes (table in
+`PROTOCOL.md`): `ap.AccesspointLoginError` (`PremiumAccountRequired`,
+`BadCredentials`, ...), `librespot.ErrMediaRestricted`,
+`librespot.ErrNoSupportedFormats`, `librespot.HTTPStatusError` /
+`spclient.StatusError` (429, 404/410, 401/403), `spclient.RateLimitedError`
+(carries `Retry-After`), `audio.KeyProviderError`, and the extended-metadata
+batch entries whose status only exists as text
+(`extended metadata request returned status N`). The account's product type is
+read from the accesspoint's product-info packet and only refines a failure that
+already happened (a free account's refused key is `premium_required`, a Premium
+account's is `track_unavailable`). `Manager.Do` returns a `*CodedError` (the
+original error stays reachable through `Unwrap`, so the permanent/retry
+decisions keep working); a rate limit is permanent, it does not rebuild the
+session.
+
+**Album gain.** Already in `BuildTrackInfo`: `default_album_normalization_params`
+of the AUDIO_FILES response, same formula as the track gain (see PROTOCOL.md).
+With `--debug`, an `open` also logs the ogg header's own gains next to the
+AUDIO_FILES-derived ones (header read through reflection, logging only).
 
 ### Item images
 

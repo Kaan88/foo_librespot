@@ -42,8 +42,13 @@ public:
 		} catch (const flp::cancelled&) {
 			throw exception_aborted();
 		} catch (const std::exception& error) {
-			flp::throw_io_error(error);
+			flp::throw_track_error(error, m_path.c_str());
 		}
+
+		// Spotify lists the track but it has no usable audio file (removed or
+		// not playable): fail it now as unavailable, so playback moves on. Info
+		// reads (playlist columns, properties) still want to show what is known.
+		if (reason == input_open_decode && !m_track.playable) flp::throw_unplayable(m_path.c_str());
 	}
 
 	void get_info(file_info& p_info, abort_callback& aborter) {
@@ -125,9 +130,14 @@ public:
 		// The exact bitrate of the file open picked is in the open header; report
 		// it once, after playback starts, so the now-playing display is accurate
 		// even when the pre-playback `info` estimate differed.
-		if (m_pending_bitrate <= 0) return false;
-		p_out.info_set_bitrate(m_pending_bitrate);
+		if (m_pending_bitrate <= 0 && !m_pending_gain) return false;
+		if (m_pending_bitrate > 0) p_out.info_set_bitrate(m_pending_bitrate);
+		// ReplayGain from the open header: when `info` could not tell the album
+		// values (or relinking changed the file), foobar2000's album gain mode
+		// picks them up from here.
+		if (m_pending_gain) p_out.set_replaygain(m_gain);
 		m_pending_bitrate = 0;
+		m_pending_gain = false;
 		p_timestamp_delta = 0.0;
 		return true;
 	}
@@ -169,6 +179,7 @@ private:
 			m_sample_rate = opened.sample_rate > 0 ? opened.sample_rate : 44100;
 			m_channels = opened.channels > 0 ? opened.channels : 2;
 			if (!opened.track.uri.empty()) {
+				queue_gain_update(opened.track);
 				m_track = opened.track;
 				m_have_track = true;
 			}
@@ -178,14 +189,39 @@ private:
 		} catch (const flp::cancelled&) {
 			throw exception_aborted();
 		} catch (const std::exception& error) {
-			flp::throw_io_error(error);
+			flp::throw_track_error(error, m_path.c_str());
 		}
+	}
+
+	// Remembers the open header's ReplayGain values for dynamic info when they
+	// differ from what get_info reported (typically: the header has album gain
+	// and `info` did not).
+	void queue_gain_update(const flp::track_info& opened) {
+		if (!opened.has_track_gain && !opened.has_album_gain) return;
+		const auto differs = [](bool hadA, double a, bool hadB, double b) {
+			return hadA != hadB || (hadB && std::fabs(a - b) > 0.005);
+		};
+		const bool known = m_have_track;
+		if (known && !differs(m_track.has_album_gain, m_track.album_gain_db, opened.has_album_gain,
+				opened.album_gain_db) &&
+			!differs(m_track.has_track_gain, m_track.track_gain_db, opened.has_track_gain,
+				opened.track_gain_db)) {
+			return;
+		}
+		m_gain = replaygain_info();
+		if (opened.has_track_gain) m_gain.m_track_gain = static_cast<float>(opened.track_gain_db);
+		if (opened.has_track_peak) m_gain.m_track_peak = static_cast<float>(opened.track_peak);
+		if (opened.has_album_gain) m_gain.m_album_gain = static_cast<float>(opened.album_gain_db);
+		if (opened.has_album_peak) m_gain.m_album_peak = static_cast<float>(opened.album_peak);
+		m_pending_gain = !m_gain.empty();
 	}
 
 	std::string m_path;
 	flp::track_info m_track;
 	bool m_have_track = false;
 	int m_pending_bitrate = 0;
+	bool m_pending_gain = false;
+	replaygain_info m_gain;
 
 	std::unique_ptr<flp::pipe_stream> m_stream;
 	unsigned m_sample_rate = 44100;
