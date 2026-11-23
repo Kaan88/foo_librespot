@@ -331,9 +331,9 @@ spike.exe dump <spotify:track:ID | open.spotify.com/track/ID | ID> <out.wav>
 
 ## Live verification
 
-Against the logged-in Premium account (`%APPDATA%\foo_librespot\credentials.json`):
+Against a logged-in Premium account (`%APPDATA%\foo_librespot\credentials.json`):
 
-- `status` → `{"ok":true,"logged_in":true,"username":"testuser0001","country":"SE","version":"0.2.0"}`.
+- `status` → `{"ok":true,"logged_in":true,"username":"<your-username>","country":"<CC>","version":"0.2.0"}`.
 - `resolve https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj` → 14 tracks with
   covers and gains; Liked Songs → 377 tracks; `info` with all 377 URIs in one
   request (4 batches) returned 377 entries in order, all with `cover_url` and

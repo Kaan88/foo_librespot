@@ -16,7 +16,7 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 ### Phase 2: playback in foobar2000 ✅
 - `spotify:track:` entries play with seeking. Tags, ReplayGain values (from Spotify's loudness data) and album art all work.
 - File > Add Spotify link...; a preferences page (login, bitrate 96/160/320).
-- The 32-bit build runs in the user's portable foobar2000. The package contains x86 and x64 builds.
+- Runs in 64-bit foobar2000 v2 (the package is x64 only).
 
 ## Next
 
@@ -62,8 +62,3 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
   - Do (a) and tell the user which field to use.
 - **Seek accuracy relies on a private go-librespot value** (the Vorbis decoder's granule position, read through reflection). A go-librespot upgrade could break it; the bridge then decodes from the start of the track, which is exact but slower. Recheck after every go-librespot update.
 - **Known Phase 4 limits:** search can't return playlists (no endpoint reachable from this login); `playlist_add` hasn't had a real write yet (dry run only); dropping `https://open.spotify.com` URLs depends on foobar2000 asking our filesystem before its HTTP one.
-- **Leftover worktree folders** `Desktop\fbp-bridge`, `Desktop\fbp-component` and `Desktop\foobar_plugin-phase0` are locked and still need deleting, along with the `bridge-v1` / `component-v1` branches.
-
-## Working agreement
-- The implementing model (DeepSeek Flash earlier, now cc-sonnet = opencode `claude-code/sonnet`) writes the code on its own branch and worktree. Claude reviews it, rebuilds independently and merges into main.
-- Install target: portable 32-bit foobar2000 at `Desktop\foobar2000`, in `profile\user-components\foo_librespot\`. Close foobar2000 before swapping the DLL.

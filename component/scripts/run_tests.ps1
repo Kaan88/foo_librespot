@@ -13,7 +13,8 @@
 param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
-    [string]$Foobar2000Dir = "C:\Users\you\Desktop\foobar2000"
+    # foobar2000 install whose shared.dll the metadata test borrows; skipped when unset.
+    [string]$Foobar2000Dir = $env:FOOBAR2000_DIR
 )
 
 $ErrorActionPreference = "Stop"
@@ -230,8 +231,8 @@ try {
     Assert ($r.Code -eq 1 -and $r.Output -match "code=not_logged_in") "v3 writes need a login too"
 
     # --- metadata mapping (SDK file_info, no host) -------------------------
-    $sharedDll = Join-Path $Foobar2000Dir "shared.dll"
-    if (Test-Path $sharedDll) {
+    $sharedDll = if ($Foobar2000Dir) { Join-Path $Foobar2000Dir "shared.dll" } else { "" }
+    if ($sharedDll -and (Test-Path $sharedDll)) {
         # The probe must match the architecture of the foobar2000 install it borrows
         # shared.dll from (the portable install may be 32-bit or 64-bit).
         $dllBytes = [IO.File]::ReadAllBytes($sharedDll)
@@ -271,7 +272,6 @@ try {
 
     # --- Python fake bridge ------------------------------------------------
     $pythonCandidates = @(
-        "C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe",
         "python.exe", "py.exe"
     )
     $python = $pythonCandidates | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } |

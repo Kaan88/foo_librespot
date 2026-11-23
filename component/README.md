@@ -101,7 +101,6 @@ The official foobar2000 SDK is downloaded on demand by
 ```powershell
 cd component
 .\scripts\build.ps1                     # Release x64
-.\scripts\build.ps1 -Platform Win32     # the 32-bit build foobar2000 x86 loads
 .\scripts\build.ps1 -WithTools          # + tools/fake_bridge, tools/bridge_probe
 ```
 
@@ -112,7 +111,6 @@ toolset (v145 for MSVC 14.5x) and passes it to MSBuild as
 Products:
 
 - `build/<Config>/x64/foo_librespot.dll`
-- `build/<Config>/Win32/foo_librespot.dll`
 - `build/tools/<Config>/<Platform>/fake_bridge.exe`, `bridge_probe.exe`,
   `metadata_probe.exe`, `sync_plan_test.exe`
 
@@ -123,20 +121,17 @@ Products:
 .\scripts\package.ps1 -BridgeExe ..\bridge\bin\librespot-bridge.exe
 ```
 
-Builds both platforms and produces `dist/foo_librespot.fb2k-component` (a zip)
-in the foobar2000 v2 multi-architecture layout:
+Builds Release x64 and produces `dist/foo_librespot.fb2k-component` (a zip).
+The component is x64 only; 32-bit foobar2000 is not supported.
 
 ```
-foo_librespot.dll          x86 DLL, at the component root
-librespot-bridge.exe       its helper
 x64/foo_librespot.dll      x64 DLL
 x64/librespot-bridge.exe   its helper
 ```
 
-If the bridge executable is missing, the DLLs are still packaged and a warning
+If the bridge executable is missing, the DLL is still packaged and a warning
 is printed. The bridge is looked up next to the DLL at runtime
-(`core_api::get_my_full_path()`), then in the parent folder, so a DLL copied out
-of its architecture folder still finds a bridge at the package root.
+(`core_api::get_my_full_path()`), then in the parent folder.
 
 ## Test
 
@@ -278,11 +273,11 @@ scripts/                   fetch_sdk / build / test / package
   keeps the build self-contained (the SDK does not ship WTL).
 - The bridge executable is built from `../bridge` (`bridge\build.ps1`) and
   supplied to packaging with `-BridgeExe` (the default points at it).
-- Clipboard paste / drag-and-drop of Spotify URLs is not wired to the add-link
-  resolver (nice-to-have, not implemented).
+- Pasted and dropped Spotify links go through a `filesystem` service
+  (`src/spotify_filesystem.cpp`), not the add-link dialog.
 - `retag` is not supported (virtual tracks).
 - The Spotify tab, its dark-mode rendering and the playlist sync operate on
-  foobar2000 APIs that cannot run outside the host; they are built for x86 and
+  foobar2000 APIs that cannot run outside the host; they are built for
   x64 and the protocol layer/diff are covered by the tests above, but the
   in-app UI still needs a real foobar2000 run to be verified visually.
 - Columns UI is not supported (see "Spotify tab").
