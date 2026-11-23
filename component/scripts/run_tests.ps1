@@ -102,6 +102,39 @@ try {
     Assert ($r.Code -eq 0 -and $r.Output -match "resolve count=4") "revision change changes track count"
     Assert ($r.Output -match "context .*revision=2 .*track_count=4") "new context revision"
 
+    # --- protocol v3: saved/save/unsave, playlist_add, radio, album/artist uris ----
+    $trackA = "spotify:track:0123456789abcdefghijkl"
+    $trackB = "spotify:track:zyxwvutsrqponmlkjihgfe"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "info", $trackA)
+    Assert ($r.Output -match "album_uri=spotify:album:fakealbum000000000001 artist_uris=2") `
+        "info carries optional album_uri and artist_uris"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "saved", $trackA, $trackB)
+    Assert ($r.Code -eq 0 -and $r.Output -match "saved false false") "saved: nothing liked yet"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "save", $trackA)
+    Assert ($r.Code -eq 0 -and $r.Output -match "save ok count=1") "save succeeds"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "saved", $trackA, $trackB)
+    Assert ($r.Output -match "saved true false") "saved reflects save, same order"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "unsave", $trackA)
+    $r = Invoke-Probe @("--pipe", $normalPipe, "saved", $trackA)
+    Assert ($r.Output -match "saved false") "unsave removes the like"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "library")
+    Assert ($r.Output -match "name=Road Trip .*editable=true") "editable playlist flag (true)"
+    Assert ($r.Output -match "name=Shared Mix .*editable=false") "editable playlist flag (false)"
+    Assert ($r.Output -match "name=Daily Mix 1 .*editable=false") "items without the flag default to false"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "playlist_add", "spotify:playlist:user000000000000000001", $trackA, $trackB)
+    Assert ($r.Code -eq 0 -and $r.Output -match "playlist_add ok revision=pa1") "playlist_add returns a revision"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "playlist_add", "spotify:playlist:shared00000000000001", $trackA)
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=bad_request") "playlist_add to a foreign playlist is bad_request"
+
+    $r = Invoke-Probe @("--pipe", $normalPipe, "radio", $trackA)
+    Assert ($r.Code -eq 0 -and $r.Output -match "radio count=4") "radio returns tracks"
+    Assert ($r.Output -match "context uri=spotify:station:.* name=Fake Track 1 Radio .*revision=r1") "radio carries a context"
+    $r = Invoke-Probe @("--pipe", $normalPipe, "radio", "spotify:track:unsupported")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=unsupported") "unsupported writes surface as code=unsupported"
+
     $r = Invoke-Probe @("--pipe", $normalPipe, "info", "--bitrate", "96",
         "spotify:track:0123456789abcdefghijkl")
     Assert ($r.Code -eq 0 -and $r.Output -match "bitrate=96") "info reports the preferred bitrate"
@@ -148,6 +181,8 @@ try {
 
     $r = Invoke-Probe @("--pipe", $loggedOutPipe, "info", "spotify:track:0123456789abcdefghijkl")
     Assert ($r.Code -eq 1 -and $r.Output -match "code=not_logged_in") "not_logged_in error code"
+    $r = Invoke-Probe @("--pipe", $loggedOutPipe, "save", "spotify:track:0123456789abcdefghijkl")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=not_logged_in") "v3 writes need a login too"
 
     # --- metadata mapping (SDK file_info, no host) -------------------------
     $sharedDll = Join-Path $Foobar2000Dir "shared.dll"
@@ -166,7 +201,7 @@ try {
     $syncOutput = & $syncPlanTest 2>&1 | Out-String
     $syncCode = $LASTEXITCODE
     Assert ($syncCode -eq 0 -and $syncOutput -match "All sync plan tests passed") `
-        "sync plan (insert/remove/reorder/duplicates/protected playing item)"
+        "sync plan (insert/remove/reorder/duplicates/protected playing item), insert runs, Spotify link parsing"
 
     # --- process spawn -----------------------------------------------------
     $spawnDir = Join-Path $env:TEMP "foo_librespot_spawn_test"
@@ -201,8 +236,21 @@ try {
             $r = Invoke-Probe @("--pipe", $pythonPipe, "library")
             Assert ($r.Code -eq 0 -and $r.Output -match "library sections=5" `
                 -and $r.Output -match "kind=collection") "python fake bridge library"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "saved", "spotify:track:0123456789abcdefghijkl")
+            Assert ($r.Code -eq 0 -and $r.Output -match "saved false") "python fake bridge saved"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "save", "spotify:track:0123456789abcdefghijkl")
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "saved", "spotify:track:0123456789abcdefghijkl")
+            Assert ($r.Output -match "saved true") "python fake bridge save/saved round trip"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "library")
+            Assert ($r.Output -match "name=Road Trip .*editable=true") "python fake bridge editable playlists"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "playlist_add", "spotify:playlist:user000000000000000001", "spotify:track:0123456789abcdefghijkl")
+            Assert ($r.Code -eq 0 -and $r.Output -match "revision=pa1") "python fake bridge playlist_add"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "radio", "spotify:track:0123456789abcdefghijkl")
+            Assert ($r.Code -eq 0 -and $r.Output -match "radio count=4" -and $r.Output -match "name=Fake Track 1 Radio") "python fake bridge radio"
+            $r = Invoke-Probe @("--pipe", $pythonPipe, "info", "spotify:track:0123456789abcdefghijkl")
+            Assert ($r.Output -match "album_uri=spotify:album:fakealbum000000000001") "python fake bridge album_uri"
             $r = Invoke-Probe @("--pipe", $pythonPipe, "resolve", "spotify:playlist:py0000000000000000001")
-            Assert ($r.Code -eq 0 -and $r.Output -match "context .*revision=1") `
+            Assert ($r.Code -eq 0 -and $r.Output -match "context .*revision=\d+") `
                 "python fake bridge resolve context"
         } else {
             Write-Host "SKIP  python fake bridge (pywin32 not installed)"

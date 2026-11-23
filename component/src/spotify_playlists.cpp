@@ -23,6 +23,10 @@ const GUID kPlaylistContextGuid = { 0x7c2f5a41, 0x0d63, 0x4b9e, { 0x8a, 0x31, 0x
 // "foo_librespot.revision": the context revision last applied.
 const GUID kPlaylistRevisionGuid = { 0x1e94b7d0, 0x6a58, 0x4f21, { 0xb3, 0x47, 0xd8, 0x0c, 0x95, 0x62, 0x1f, 0xa8 } };
 
+// "foo_librespot.static": set on playlists that are a one-off snapshot (radio,
+// artist top tracks). The sync timer and "Sync now" skip them.
+const GUID kPlaylistStaticGuid = { 0x93d6e0a2, 0x4c17, 0x4f8b, { 0x9a, 0x5e, 0x21, 0x68, 0xb0, 0x3d, 0xc7, 0x4f } };
+
 std::string property_to_string(const pfc::array_t<t_uint8>& data) {
 	if (data.get_size() == 0) return std::string();
 	return std::string(reinterpret_cast<const char*>(data.get_ptr()), data.get_size());
@@ -100,6 +104,13 @@ bool set_playlist_revision(t_size playlist, const std::string& revision) {
 	return true;
 }
 
+bool is_static_playlist(t_size playlist) {
+	std::string value;
+	return get_property(playlist, kPlaylistStaticGuid, value) && !value.empty();
+}
+
+void set_static_playlist(t_size playlist) { set_property(playlist, kPlaylistStaticGuid, "1"); }
+
 t_size find_playlist_by_context(const std::string& context_uri) {
 	if (context_uri.empty()) return pfc::infinite_size;
 	playlist_manager::ptr manager = playlist_manager::get();
@@ -118,6 +129,7 @@ std::vector<tracked_playlist> list_tracked_playlists() {
 	for (t_size i = 0; i < count; ++i) {
 		std::string stored;
 		if (!get_property(i, kPlaylistContextGuid, stored) || stored.empty()) continue;
+		if (is_static_playlist(i)) continue;
 		out.push_back(tracked_playlist{ i, stored });
 	}
 	return out;
@@ -232,10 +244,15 @@ apply_result apply_context(const std::string& context_uri, const std::string& na
 		}
 	}
 
-	for (const sync_insertion& insertion : plan.insert) {
-		metadb_handle_ptr handle = metadb::get()->handle_create(insertion.uri.c_str(), 0);
-		pfc::list_single_ref_t<metadb_handle_ptr> one(handle);
-		const t_size inserted = manager->playlist_insert_items(playlist, insertion.index, one,
+	// One playlist_insert_items per contiguous run (a first load is one run)
+	// instead of one per track.
+	for (const insert_run& run : group_insertions(plan.insert)) {
+		metadb_handle_list handles;
+		handles.prealloc(run.uris.size());
+		for (const std::string& uri : run.uris) {
+			handles.add_item(metadb::get()->handle_create(uri.c_str(), 0));
+		}
+		const t_size inserted = manager->playlist_insert_items(playlist, run.index, handles,
 			bit_array_false());
 		if (inserted == pfc::infinite_size) {
 			result.error = "Spotify: the playlist is locked";
@@ -253,6 +270,7 @@ bool detach_playlist(t_size playlist) {
 	if (playlist == pfc::infinite_size) return false;
 	const bool detached = manager->playlist_remove_property(playlist, kPlaylistContextGuid);
 	manager->playlist_remove_property(playlist, kPlaylistRevisionGuid);
+	manager->playlist_remove_property(playlist, kPlaylistStaticGuid);
 	return detached;
 }
 
@@ -358,6 +376,43 @@ void add_context_to_active_async(const std::string& context_uri, operation_done 
 			}
 			insert_tracks_into_active(tracks);
 			if (done) done(true, std::string(), playlist_manager::get()->get_active_playlist());
+		});
+	});
+}
+
+void open_snapshot_async(const std::string& key, const std::string& name,
+	std::function<resolve_result(bridge_client&, const cancel_token&)> fetch,
+	operation_done done, cancel_token cancel) {
+	fb2k::splitTask([key, name, fetch, done, cancel] {
+		resolve_result resolved;
+		std::string error;
+		try {
+			ensure_bridge_started(fb2k::mainAborter());
+			bridge_client client;
+			resolved = fetch(client, cancel);
+			if (resolved.tracks.empty()) error = "Spotify: no tracks found";
+		} catch (const cancelled&) {
+			return;
+		} catch (const std::exception& failure) {
+			error = user_error_message(failure);
+		}
+
+		fb2k::inMainThread([key, name, done, resolved, error] {
+			if (!error.empty()) {
+				if (done) done(false, error, pfc::infinite_size);
+				return;
+			}
+			const std::string displayName =
+				resolved.context.name.empty() ? name : resolved.context.name;
+			const apply_result applied = apply_context(key, displayName, std::string(),
+				resolved.tracks, true);
+			if (!applied.valid) {
+				if (done) done(false, applied.error, pfc::infinite_size);
+				return;
+			}
+			set_static_playlist(applied.playlist);
+			playlist_manager::get()->set_active_playlist(applied.playlist);
+			if (done) done(true, std::string(), applied.playlist);
 		});
 	});
 }

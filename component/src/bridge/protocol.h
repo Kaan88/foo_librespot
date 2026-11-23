@@ -35,6 +35,9 @@ struct track_info {
 	std::string codec;
 	int bitrate = 0;
 	std::string cover_url;
+	// v3, optional: spotify:album:ID and the artists' spotify:artist:ID URIs.
+	std::string album_uri;
+	std::vector<std::string> artist_uris;
 
 	bool has_track_gain = false;
 	bool has_track_peak = false;
@@ -74,6 +77,7 @@ struct library_item {
 	std::string image_url;
 	std::string revision;
 	long long track_count = 0;
+	bool editable = false; // v3: the user can add tracks to this playlist
 };
 
 struct library_section {
@@ -140,6 +144,25 @@ public:
 
 	// v2: artist page.
 	artist_result artist(const std::string& uri, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
+
+	// v3: which of `uris` are in Liked Songs (same order).
+	std::vector<bool> saved(const std::vector<std::string>& uris, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+
+	// v3: add to / remove from Liked Songs.
+	void save(const std::vector<std::string>& uris, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+	void unsave(const std::vector<std::string>& uris, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+
+	// v3: appends tracks to one of the user's playlists; returns the new revision.
+	std::string playlist_add(const std::string& playlist, const std::vector<std::string>& uris,
+		const cancel_token& ct, unsigned connect_timeout_ms = 5000,
+		unsigned reply_timeout_ms = 30000);
+
+	// v3: radio based on a track, artist, album or playlist (resolve-shaped reply).
+	resolve_result radio(const std::string& uri, const cancel_token& ct,
 		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 60000);
 
 	// Sends one JSON request line and returns the parsed reply. Used by the

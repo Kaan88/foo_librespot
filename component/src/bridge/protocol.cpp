@@ -36,6 +36,12 @@ track_info parse_track(const json::value& t) {
 	out.codec = t.get_string("codec");
 	out.bitrate = static_cast<int>(t.get_int64("bitrate"));
 	out.cover_url = t.get_string("cover_url");
+	out.album_uri = t.get_string("album_uri");
+	if (const json::value* uris = t.find("artist_uris"); uris != nullptr && uris->is_array()) {
+		for (const json::value& a : uris->array) {
+			if (a.is_string() && !a.string.empty()) out.artist_uris.push_back(a.string);
+		}
+	}
 	out.playable = t.get_bool("playable", true);
 
 	if (const json::value* v = t.find("track_gain_db"); v != nullptr && v->is_number()) {
@@ -81,6 +87,7 @@ library_item parse_item(const json::value& value) {
 	out.image_url = value.get_string("image_url");
 	out.revision = value.get_string("revision");
 	out.track_count = value.get_int64("track_count");
+	out.editable = value.get_bool("editable", false);
 	return out;
 }
 
@@ -228,6 +235,57 @@ artist_result bridge_client::artist(const std::string& uri, const cancel_token& 
 	out.top_tracks = parse_tracks(reply, "top_tracks");
 	out.albums = parse_items(reply, "albums");
 	out.singles = parse_items(reply, "singles");
+	return out;
+}
+
+std::vector<bool> bridge_client::saved(const std::vector<std::string>& uris,
+	const cancel_token& ct, unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	if (uris.empty()) return {};
+	const json::value reply = request("{\"op\":\"saved\",\"uris\":" + uris_json(uris) + "}", ct,
+		connect_timeout_ms, reply_timeout_ms);
+	std::vector<bool> out(uris.size(), false);
+	if (const json::value* flags = reply.find("saved"); flags != nullptr && flags->is_array()) {
+		for (size_t i = 0; i < flags->array.size() && i < out.size(); ++i) {
+			out[i] = flags->array[i].is_bool() && flags->array[i].boolean;
+		}
+	}
+	return out;
+}
+
+void bridge_client::save(const std::vector<std::string>& uris, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	if (uris.empty()) return;
+	request("{\"op\":\"save\",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+}
+
+void bridge_client::unsave(const std::vector<std::string>& uris, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	if (uris.empty()) return;
+	request("{\"op\":\"unsave\",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+}
+
+std::string bridge_client::playlist_add(const std::string& playlist,
+	const std::vector<std::string>& uris, const cancel_token& ct, unsigned connect_timeout_ms,
+	unsigned reply_timeout_ms) {
+	const json::value reply = request("{\"op\":\"playlist_add\",\"playlist\":" +
+		json::quote(playlist) + ",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+	return reply.get_string("revision");
+}
+
+resolve_result bridge_client::radio(const std::string& uri, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request("{\"op\":\"radio\",\"uri\":" + json::quote(uri) + "}", ct,
+		connect_timeout_ms, reply_timeout_ms);
+	resolve_result out;
+	out.tracks = parse_tracks(reply);
+	if (const json::value* context = reply.find("context");
+		context != nullptr && context->is_object()) {
+		out.context = parse_context(*context);
+		out.has_context = true;
+	}
 	return out;
 }
 

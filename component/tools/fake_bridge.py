@@ -33,7 +33,7 @@ import win32pipe
 PIPE_UNLIMITED_INSTANCES = 255
 
 ARGS = None
-STATE = {"revision": "1", "tracks": 3}
+STATE = {"revision": "1", "tracks": 3, "saved": set(), "playlist_adds": 0}
 STATE_LOCK = threading.Lock()
 
 
@@ -53,6 +53,9 @@ def make_track(uri, index=0, bitrate=320):
         "title": f"Fake Track {index + 1}",
         "artists": ["Fake Artist", "Second Artist"] if index == 0 else ["Fake Artist"],
         "album": "Fake Album",
+        "album_uri": "spotify:album:fakealbum000000000001",
+        "artist_uris": (["spotify:artist:fakeartist00000000001", "spotify:artist:secondartist0000000001"]
+                        if index == 0 else ["spotify:artist:fakeartist00000000001"]),
         "album_artist": "Fake Artist",
         "track_number": index + 1,
         "disc_number": 1,
@@ -69,8 +72,8 @@ def make_track(uri, index=0, bitrate=320):
     }
 
 
-def make_item(uri, kind, name, subtitle="", revision=None, track_count=None):
-    return {
+def make_item(uri, kind, name, subtitle="", revision=None, track_count=None, editable=None):
+    item = {
         "uri": uri,
         "kind": kind,
         "name": name,
@@ -79,6 +82,9 @@ def make_item(uri, kind, name, subtitle="", revision=None, track_count=None):
         "track_count": track_count,
         "revision": revision,
     }
+    if editable is not None:
+        item["editable"] = editable
+    return item
 
 
 def context_name(uri):
@@ -108,7 +114,9 @@ def make_library():
                           "Discover Weekly", "Spotify", revision, count)]},
             {"id": "playlists", "title": "Your playlists", "items": [
                 make_item("spotify:playlist:user000000000000000001", "playlist",
-                          "Road Trip", "fake_user", revision, count)]},
+                          "Road Trip", "fake_user", revision, count, True),
+                make_item("spotify:playlist:shared00000000000001", "playlist",
+                          "Shared Mix", "someone_else", revision, count, False)]},
             {"id": "albums", "title": "Albums", "items": [
                 make_item("spotify:album:alb0000000000000000001", "album",
                           "Saved Album One", "Fake Artist", revision, count),
@@ -242,7 +250,8 @@ def handle_connection(handle):
             write_all(handle, (json.dumps(reply) + "\n").encode("utf-8"))
             return
 
-        if ARGS.logged_out and op in ("info", "resolve", "open", "library", "search", "artist"):
+        if ARGS.logged_out and op in ("info", "resolve", "open", "library", "search", "artist",
+                                       "saved", "save", "unsave", "playlist_add", "radio"):
             write_all(handle, (json.dumps(error_reply("not_logged_in", "not logged in")) + "\n").encode("utf-8"))
             return
 
@@ -270,6 +279,46 @@ def handle_connection(handle):
 
         if op == "artist":
             write_all(handle, (json.dumps(make_artist(request.get("uri", ""))) + "\n").encode("utf-8"))
+            return
+
+        if op in ("saved", "save", "unsave"):
+            uris = request.get("uris")
+            if not isinstance(uris, list):
+                write_all(handle, (json.dumps(error_reply("bad_request", "uris required")) + "\n").encode("utf-8"))
+                return
+            with STATE_LOCK:
+                if op == "saved":
+                    reply = {"ok": True, "saved": [u in STATE["saved"] for u in uris]}
+                else:
+                    for u in uris:
+                        if op == "save":
+                            STATE["saved"].add(u)
+                        else:
+                            STATE["saved"].discard(u)
+                    STATE["revision"] = str(int(STATE["revision"]) + 1)
+                    reply = {"ok": True}
+            write_all(handle, (json.dumps(reply) + "\n").encode("utf-8"))
+            return
+
+        if op == "playlist_add":
+            if request.get("playlist") != "spotify:playlist:user000000000000000001":
+                write_all(handle, (json.dumps(error_reply("bad_request", "you cannot edit this playlist")) + "\n").encode("utf-8"))
+                return
+            with STATE_LOCK:
+                STATE["playlist_adds"] += 1
+                revision = "pa%d" % STATE["playlist_adds"]
+            write_all(handle, (json.dumps({"ok": True, "revision": revision}) + "\n").encode("utf-8"))
+            return
+
+        if op == "radio":
+            uri = request.get("uri", "")
+            if uri == "spotify:track:unsupported":
+                write_all(handle, (json.dumps(error_reply("unsupported", "Spotify refused radio for this login")) + "\n").encode("utf-8"))
+                return
+            tracks = [make_track("", i) for i in range(4)]
+            context = {"uri": "spotify:station:" + uri, "name": "Fake Track 1 Radio", "owner": "Spotify",
+                       "image_url": None, "revision": "r1", "track_count": 4}
+            write_all(handle, (json.dumps({"ok": True, "tracks": tracks, "context": context}) + "\n").encode("utf-8"))
             return
 
         if op == "test_control":
