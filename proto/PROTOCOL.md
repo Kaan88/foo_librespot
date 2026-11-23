@@ -72,3 +72,40 @@ then the SAME connection carries raw interleaved float32 little-endian PCM until
  "playable":true}
 ```
 Gains are ReplayGain 2.0 values computed from Spotify loudness metadata: `track_gain_db = -18 - loudness_db`, `track_peak = 10^(true_peak_db/20)` (linear). Album values null if unknown. Not applied to the audio; foobar2000 applies them via its ReplayGain setting.
+
+## v2 additions (Phase 3: Spotify tab and synced playlists)
+
+All v1 requests stay as they are. New fields are optional and clients must ignore unknown fields.
+
+### Changes to v1 requests
+- `info` takes an optional `"bitrate":96|160|320` (the client's preferred setting). Every returned `<track_info>` then has `bitrate` set to the bitrate of the file `open` would pick (not null), and `codec` set likewise.
+- `resolve` replies also carry, for album and playlist contexts:
+  `"context":{"uri":"spotify:playlist:ID","name":"Daily Mix 1","owner":"Spotify","image_url":"https://...","revision":"<opaque string>","track_count":50}`.
+  `revision` changes whenever the playlist's contents change (playlist revision; for Liked Songs and albums, a hash of the track URI list). Clients use it to skip syncs when nothing has changed.
+
+### library  (contents of the Spotify tab)
+`{"op":"library"}` ->
+```
+{"ok":true,"sections":[
+  {"id":"liked","title":"Liked Songs","items":[<item>]},          // one collection item
+  {"id":"made_for_you","title":"Made for you","items":[<item>...]},
+  {"id":"playlists","title":"Your playlists","items":[<item>...]},
+  {"id":"albums","title":"Albums","items":[<item>...]},
+  {"id":"artists","title":"Artists","items":[<item>...]}]}
+```
+`<item>`: `{"uri":"spotify:playlist:ID","kind":"playlist|album|artist|collection","name":"...","subtitle":"owner or artist","image_url":"https://...|null","track_count":50|null,"revision":"...|null"}`
+- Liked Songs is `spotify:user:<username>:collection`, kind `collection`.
+- "Made for you" holds Spotify-generated playlists the user follows or that are in their rootlist (Daily Mixes, Discover Weekly, Release Radar, owner "Spotify"). If a separate "made for you" source isn't reachable through go-librespot, put Spotify-owned playlists from the rootlist here.
+- An empty section is returned with `items: []`, never left out.
+
+### search
+`{"op":"search","query":"nation of language","limit":20}` ->
+`{"ok":true,"tracks":[<track_info>...],"albums":[<item>...],"artists":[<item>...],"playlists":[<item>...]}`
+- `limit` applies to each category (default 20, max 50).
+
+### artist  (artist page)
+`{"op":"artist","uri":"spotify:artist:ID"}` ->
+`{"ok":true,"artist":<item>,"top_tracks":[<track_info>...],"albums":[<item>...],"singles":[<item>...]}`
+
+### Errors
+New requests use the same error codes. A feature that go-librespot can't reach answers `{"ok":false,"code":"unsupported","error":"..."}`, and the client shows the message.
