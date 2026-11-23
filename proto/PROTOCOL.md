@@ -109,3 +109,24 @@ All v1 requests stay as they are. New fields are optional and clients must ignor
 
 ### Errors
 New requests use the same error codes. A feature that go-librespot can't reach answers `{"ok":false,"code":"unsupported","error":"..."}`, and the client shows the message.
+
+## v3 additions (Phase 4: context menu and write actions)
+
+### saved  (is a track in Liked Songs?)
+`{"op":"saved","uris":["spotify:track:ID",...]}` -> `{"ok":true,"saved":[true,false,...]}` (same order)
+
+### save / unsave  (Liked Songs)
+`{"op":"save","uris":["spotify:track:ID",...]}` -> `{"ok":true}`
+`{"op":"unsave","uris":[...]}` -> `{"ok":true}`
+- Afterwards the Liked Songs revision changes, so a sync picks it up.
+
+### playlist_add  (add tracks to one of the user's Spotify playlists)
+`{"op":"playlist_add","playlist":"spotify:playlist:ID","uris":["spotify:track:ID",...]}` -> `{"ok":true,"revision":"..."}`
+- Appends at the end. Fails with `bad_request` if the user can't edit that playlist.
+- `library` items for playlists get an optional `"editable":true|false` so clients can list only playlists they can add to.
+
+### radio  (tracks for a radio based on a track, artist, album or playlist)
+`{"op":"radio","uri":"spotify:track:ID"}` -> same reply shape as `resolve` (with `context`: name like "<title> Radio", uri of the radio/station context).
+
+### Errors
+If Spotify rejects a write from this kind of login, answer `{"ok":false,"code":"unsupported","error":"<what Spotify said>"}`, never a fake success.
