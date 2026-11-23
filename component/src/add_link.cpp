@@ -5,6 +5,7 @@
 
 #include "bridge/process.h"
 
+#include <SDK/coreDarkMode.h>
 #include <SDK/popup_message.h>
 #include <SDK/core_api.h>
 #include <SDK/menu.h>
@@ -27,6 +28,10 @@ class add_link_dialog {
 public:
 	std::string text;
 
+private:
+	fb2k::CCoreDarkModeHooks m_dark;
+
+public:
 	INT_PTR run(HWND parent) {
 		return DialogBoxParamW(core_api::get_my_instance(), MAKEINTRESOURCEW(IDD_ADD_LINK),
 			parent, &add_link_dialog::dialog_proc, reinterpret_cast<LPARAM>(this));
@@ -37,6 +42,7 @@ private:
 		if (message == WM_INITDIALOG) {
 			auto* self = reinterpret_cast<add_link_dialog*>(lparam);
 			SetWindowLongPtrW(wnd, GWLP_USERDATA, lparam);
+			self->m_dark.AddDialogWithControls(wnd);
 			SetDlgItemTextW(wnd, IDC_HINT,
 				L"Paste Spotify URIs (spotify:track:..., spotify:album:..., spotify:playlist:...)\n"
 				L"or open.spotify.com links, one per line:");

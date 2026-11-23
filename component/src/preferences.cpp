@@ -6,6 +6,7 @@
 
 #include "bridge/process.h"
 
+#include <SDK/coreDarkMode.h>
 #include <SDK/popup_message.h>
 
 #include <algorithm>
@@ -45,7 +46,8 @@ public:
 	}
 
 	t_uint32 get_state() override {
-		t_uint32 state = 0;
+		// Tells foobar2000 this page follows its dark mode (see on_init).
+		t_uint32 state = preferences_state::dark_mode_supported;
 		if (selected_bitrate() != flp::effective_bitrate_kbps()) state |= preferences_state::changed;
 		if (selected_interval() != flp::effective_sync_interval_minutes()) {
 			state |= preferences_state::changed;
@@ -95,6 +97,9 @@ private:
 
 	void on_init() {
 		m_status->target = m_wnd;
+		// Hooks the dialog and every control (buttons, combo boxes, edit box,
+		// group boxes) into foobar2000's own dark mode; follows the setting live.
+		m_dark.AddDialogWithControls(m_wnd);
 		SendDlgItemMessageW(m_wnd, IDC_BITRATE, CB_ADDSTRING, 0,
 			reinterpret_cast<LPARAM>(L"96 kbps"));
 		SendDlgItemMessageW(m_wnd, IDC_BITRATE, CB_ADDSTRING, 0,
@@ -406,6 +411,7 @@ private:
 	}
 
 	preferences_page_callback::ptr m_callback;
+	fb2k::CCoreDarkModeHooks m_dark;
 	HWND m_wnd = nullptr;
 	std::vector<int> m_syncValues;
 	std::vector<int> m_cacheValues;
