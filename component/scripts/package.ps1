@@ -1,14 +1,12 @@
-# Builds Release Win32 and x64 and produces dist/foo_librespot.fb2k-component.
+# Builds Release x64 and produces dist/foo_librespot.fb2k-component.
 #
-# foobar2000 v2 component package layout for a multi-architecture component:
-#   foo_librespot.dll          x86 DLL, loaded by 32-bit foobar2000
-#   librespot-bridge.exe       its helper, next to the DLL
+# The component is x64-only: 32-bit foobar2000 is no longer supported.
+# Package layout for an x64-only foobar2000 v2 component:
 #   x64/foo_librespot.dll      x64 DLL, loaded by 64-bit foobar2000
 #   x64/librespot-bridge.exe   its helper, next to the DLL
 #
 # The component looks for librespot-bridge.exe next to its own DLL and then in
-# the parent folder, so both layouts work (and so does a DLL copied out of its
-# architecture folder).
+# the parent folder.
 #
 #   .\scripts\package.ps1
 #   .\scripts\package.ps1 -BridgeExe ..\bridge\bin\librespot-bridge.exe
@@ -24,35 +22,29 @@ param(
 $ErrorActionPreference = "Stop"
 
 $componentDir = Split-Path -Parent $PSScriptRoot
-$win32Dll = Join-Path $componentDir "build\$Configuration\Win32\foo_librespot.dll"
 $x64Dll = Join-Path $componentDir "build\$Configuration\x64\foo_librespot.dll"
 $distDir = Join-Path $componentDir "dist"
 $stage = Join-Path $componentDir "build\package"
 $zip = Join-Path $distDir "foo_librespot.fb2k-component"
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration -Platform Win32
     & (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration -Platform x64
 }
 
-foreach ($dll in @($win32Dll, $x64Dll)) {
-    if (-not (Test-Path $dll)) { throw "component DLL not found: $dll (run build.ps1 first)" }
-}
+if (-not (Test-Path $x64Dll)) { throw "component DLL not found: $x64Dll (run build.ps1 -Platform x64 first)" }
 
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $x64Stage = Join-Path $stage "x64"
 New-Item -ItemType Directory -Force $x64Stage | Out-Null
 
-Copy-Item $win32Dll (Join-Path $stage "foo_librespot.dll")
 Copy-Item $x64Dll (Join-Path $x64Stage "foo_librespot.dll")
 
 $resolvedBridge = $null
 if ($BridgeExe -and (Test-Path $BridgeExe)) {
     $resolvedBridge = (Resolve-Path $BridgeExe).Path
-    Copy-Item $resolvedBridge (Join-Path $stage "librespot-bridge.exe")
     Copy-Item $resolvedBridge (Join-Path $x64Stage "librespot-bridge.exe")
 } else {
-    Write-Warning "librespot-bridge.exe not found at '$BridgeExe'; packaging the DLLs only."
+    Write-Warning "librespot-bridge.exe not found at '$BridgeExe'; packaging the DLL only."
     Write-Warning "Pass -BridgeExe <path> to include the helper."
 }
 
