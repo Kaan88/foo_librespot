@@ -4,7 +4,7 @@
 // and the file name check keeps the troubleshooter reliable.
 DECLARE_COMPONENT_VERSION(
 	"foo_librespot",
-	"0.3.0",
+	"0.3.1",
 	"Spotify playback for foobar2000 through the librespot-bridge helper process.\n"
 	"Paths: spotify:track:<id>\n"
 	"Spotify tab: Add New UI Element... > Spotify\n"

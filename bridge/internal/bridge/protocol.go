@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the bridge implementation version reported by status.
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 // Error codes of the protocol.
 const (
