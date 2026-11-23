@@ -9,7 +9,7 @@ import (
 )
 
 // Version is the bridge implementation version reported by status.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Error codes of the protocol.
 const (
@@ -17,6 +17,7 @@ const (
 	CodeUnavailable = "unavailable"
 	CodeBadRequest  = "bad_request"
 	CodeInternal    = "internal"
+	CodeUnsupported = "unsupported"
 )
 
 // request is one JSON line from a client.
@@ -26,6 +27,8 @@ type request struct {
 	URIs    []string `json:"uris"`
 	StartMs *int64   `json:"start_ms"`
 	Bitrate *int     `json:"bitrate"`
+	Query   string   `json:"query"`
+	Limit   *int     `json:"limit"`
 }
 
 type statusResponse struct {
@@ -41,6 +44,35 @@ type statusResponse struct {
 type tracksResponse struct {
 	OK     bool                 `json:"ok"`
 	Tracks []spotifyx.TrackInfo `json:"tracks"`
+}
+
+// resolveResponse is tracks plus, for album and playlist contexts, the
+// description of the context the tracks came from.
+type resolveResponse struct {
+	OK      bool                  `json:"ok"`
+	Tracks  []spotifyx.TrackInfo  `json:"tracks"`
+	Context *spotifyx.ContextInfo `json:"context,omitempty"`
+}
+
+type libraryResponse struct {
+	OK       bool               `json:"ok"`
+	Sections []spotifyx.Section `json:"sections"`
+}
+
+type searchResponse struct {
+	OK        bool                 `json:"ok"`
+	Tracks    []spotifyx.TrackInfo `json:"tracks"`
+	Albums    []spotifyx.Item      `json:"albums"`
+	Artists   []spotifyx.Item      `json:"artists"`
+	Playlists []spotifyx.Item      `json:"playlists"`
+}
+
+type artistResponse struct {
+	OK        bool                 `json:"ok"`
+	Artist    spotifyx.Item        `json:"artist"`
+	TopTracks []spotifyx.TrackInfo `json:"top_tracks"`
+	Albums    []spotifyx.Item      `json:"albums"`
+	Singles   []spotifyx.Item      `json:"singles"`
 }
 
 type openHeader struct {
@@ -77,6 +109,8 @@ func codeFor(err error) string {
 		return CodeNotLoggedIn
 	case spotifyx.IsConnectError(err):
 		return CodeUnavailable
+	case spotifyx.IsUnsupported(err):
+		return CodeUnsupported
 	case spotifyx.IsPermanent(err):
 		return CodeUnavailable
 	default:

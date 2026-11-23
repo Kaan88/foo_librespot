@@ -32,17 +32,48 @@ const (
 	// Liked Songs paging.
 	collectionPageSize = 500
 	collectionMaxPages = 100
+	// defaultBitrate is the format assumed when a request names none.
+	defaultBitrate = 320
 )
 
-// Lookup returns metadata for the given track URIs, batching and parallelising.
+// Lookup returns metadata for the given track URIs, batching, parallelising and
+// caching. Only URIs whose metadata was found are in the reply.
 func (m *Manager) Lookup(ctx context.Context, uris []string) (map[string]*trackMeta, error) {
-	var out map[string]*trackMeta
+	out := make(map[string]*trackMeta, len(uris))
+	missing := make([]string, 0, len(uris))
+	seen := make(map[string]bool, len(uris))
+	for _, uri := range uris {
+		if uri == "" || seen[uri] {
+			continue
+		}
+		seen[uri] = true
+		if meta, ok := m.trackMeta.get(uri); ok {
+			out[uri] = meta
+			continue
+		}
+		missing = append(missing, uri)
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+
+	var fetched map[string]*trackMeta
 	err := m.Do(ctx, func(env *Env) error {
 		var err error
-		out, err = fetchTracks(ctx, env, uris)
+		fetched, err = fetchTracks(ctx, env, missing)
 		return err
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	for uri, meta := range fetched {
+		if meta == nil || meta.Track == nil {
+			continue
+		}
+		m.trackMeta.put(uri, meta)
+		out[uri] = meta
+	}
+	return out, nil
 }
 
 func fetchTracks(ctx context.Context, env *Env, uris []string) (map[string]*trackMeta, error) {
@@ -157,36 +188,41 @@ func fetchBatch(ctx context.Context, env *Env, uris []string) (map[string]*track
 }
 
 // Resolve expands a track, album, playlist or Liked Songs reference to its
-// tracks, in playback order.
-func (m *Manager) Resolve(ctx context.Context, ref spotifyuri.Ref) ([]TrackInfo, error) {
-	var uris []string
+// tracks, in playback order, and describes the context it expanded.
+func (m *Manager) Resolve(ctx context.Context, ref spotifyuri.Ref) ([]TrackInfo, *ContextInfo, error) {
+	var (
+		uris []string
+		info *ContextInfo
+	)
 	err := m.Do(ctx, func(env *Env) error {
 		var err error
-		if ref.Kind == spotifyuri.KindLiked {
-			uris, err = likedURIs(ctx, env)
-		} else {
-			uris, err = contextURIs(ctx, env, m.log, ref)
-		}
+		uris, info, err = m.resolveURIs(ctx, env, ref)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	metas, err := m.Lookup(ctx, uris)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	infos := make([]TrackInfo, 0, len(uris))
-	for _, uri := range uris {
-		infos = append(infos, BuildTrackInfo(uri, metas[uri], 320))
-	}
-	return infos, nil
+	return m.buildInfos(uris, metas, defaultBitrate), info, nil
 }
 
-// Info returns metadata for individual tracks, in the order given.
-func (m *Manager) Info(ctx context.Context, uris []string) ([]TrackInfo, error) {
+// Info returns metadata for individual tracks, in the order given. bitrate is
+// the format the client would ask open for, so codec and bitrate describe the
+// file that would be played.
+func (m *Manager) Info(ctx context.Context, uris []string, bitrate int) ([]TrackInfo, error) {
+	if bitrate == 0 {
+		bitrate = defaultBitrate
+	}
+	switch bitrate {
+	case 96, 160, 320:
+	default:
+		return nil, fmt.Errorf("bitrate must be 96, 160 or 320")
+	}
+
 	canonical := make([]string, len(uris))
 	for i, raw := range uris {
 		ref, err := spotifyuri.Parse(raw)
@@ -197,19 +233,151 @@ func (m *Manager) Info(ctx context.Context, uris []string) ([]TrackInfo, error) 
 		}
 	}
 
-	metas, err := m.Lookup(ctx, canonical)
-	if err != nil {
-		return nil, err
+	infos := make([]TrackInfo, len(canonical))
+	var missing []string
+	positions := make(map[string][]int, len(canonical))
+	for i, uri := range canonical {
+		if info, ok := m.trackInfos.get(trackInfoKey{uri: uri, bitrate: bitrate}); ok {
+			infos[i] = info
+			continue
+		}
+		if len(positions[uri]) == 0 {
+			missing = append(missing, uri)
+		}
+		positions[uri] = append(positions[uri], i)
 	}
 
-	infos := make([]TrackInfo, 0, len(canonical))
-	for _, uri := range canonical {
-		infos = append(infos, BuildTrackInfo(uri, metas[uri], 320))
+	if len(missing) > 0 {
+		metas, err := m.Lookup(ctx, missing)
+		if err != nil {
+			return nil, err
+		}
+		for uri, at := range positions {
+			if metas[uri] == nil {
+				// Unknown or unplayable: describe it, but do not cache the
+				// absence, as metadata may become available.
+				for _, i := range at {
+					infos[i] = BuildTrackInfo(uri, nil, bitrate)
+				}
+				continue
+			}
+			info := BuildTrackInfo(uri, metas[uri], bitrate)
+			m.trackInfos.put(trackInfoKey{uri: uri, bitrate: bitrate}, info)
+			for _, i := range at {
+				infos[i] = info
+			}
+		}
 	}
 	return infos, nil
 }
 
-// contextURIs walks every page of a context (album, playlist, bare track).
+// buildInfos maps metadata to protocol track infos, caching each result.
+func (m *Manager) buildInfos(uris []string, metas map[string]*trackMeta, bitrate int) []TrackInfo {
+	infos := make([]TrackInfo, 0, len(uris))
+	for _, uri := range uris {
+		key := trackInfoKey{uri: uri, bitrate: bitrate}
+		if info, ok := m.trackInfos.get(key); ok {
+			infos = append(infos, info)
+			continue
+		}
+		info := BuildTrackInfo(uri, metas[uri], bitrate)
+		if metas[uri] != nil {
+			m.trackInfos.put(key, info)
+		}
+		infos = append(infos, info)
+	}
+	return infos
+}
+
+func (m *Manager) resolveURIs(ctx context.Context, env *Env, ref spotifyuri.Ref) ([]string, *ContextInfo, error) {
+	switch ref.Kind {
+	case spotifyuri.KindLiked:
+		uris, err := likedURIs(ctx, env)
+		if err != nil {
+			return nil, nil, err
+		}
+		username := env.Session.Username()
+		return uris, &ContextInfo{
+			URI:        "spotify:user:" + username + ":collection",
+			Name:       "Liked Songs",
+			Owner:      username,
+			Revision:   revisionHash(uris),
+			TrackCount: len(uris),
+		}, nil
+
+	case spotifyuri.KindPlaylist:
+		return m.playlistContext(ctx, env, ref)
+
+	case spotifyuri.KindAlbum:
+		uris, err := contextURIs(ctx, env, m.log, ref)
+		if err != nil {
+			return nil, nil, err
+		}
+		item := m.albumItems(ctx, env, []string{ref.URI})[ref.URI]
+		info := &ContextInfo{
+			URI:        ref.URI,
+			Name:       item.Name,
+			Owner:      item.Subtitle,
+			Revision:   revisionHash(uris),
+			TrackCount: len(uris),
+		}
+		if item.ImageURL != nil {
+			info.ImageURL = *item.ImageURL
+		}
+		return uris, info, nil
+
+	case spotifyuri.KindTrack:
+		uris, err := contextURIs(ctx, env, m.log, ref)
+		if err != nil {
+			return nil, nil, err
+		}
+		return uris, nil, nil
+
+	default:
+		return nil, nil, fmt.Errorf("cannot resolve a %s", ref.Kind)
+	}
+}
+
+// playlistContext reads a playlist through the playlist service: every page of
+// tracks, plus the playlist's name, owner, image and revision.
+func (m *Manager) playlistContext(ctx context.Context, env *Env, ref spotifyuri.Ref) ([]string, *ContextInfo, error) {
+	info := &ContextInfo{URI: ref.URI}
+
+	var spotCtx *connectpb.Context
+	if id, err := librespot.SpotifyIdFromUri(ref.URI); err == nil {
+		if playlistCtx, err := env.Session.Spclient().PlaylistContext(ctx, *id); err == nil {
+			spotCtx = playlistCtx
+		} else {
+			m.log.WithField("uri", ref.URI).
+				Warnf("reading the playlist directly failed (%v); falling back to context resolve", err)
+		}
+	}
+	if spotCtx == nil {
+		uris, err := walkContext(ctx, env, m.log, &connectpb.Context{Uri: ref.URI}, ref.URI)
+		if err != nil {
+			return nil, nil, err
+		}
+		info.Revision = revisionHash(uris)
+		info.TrackCount = len(uris)
+		return uris, info, nil
+	}
+
+	metadata := spotCtx.GetMetadata()
+	info.Name = metadata["context_description"]
+	info.Owner = metadata["context_owner"]
+	info.ImageURL = metadata["image_url"]
+
+	uris, err := walkContext(ctx, env, m.log, spotCtx, ref.URI)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	info.Revision = contextRevision(metadata["playlist.revision"], uris)
+	info.TrackCount = len(uris)
+	return uris, info, nil
+}
+
+// contextURIs walks every page of a context (album, bare track).
 //
 // Playlists are read through the playlist service rather than context resolve:
 // Spotify's generated playlists (Daily Mixes and the like) and playlists that
@@ -227,7 +395,11 @@ func contextURIs(ctx context.Context, env *Env, log librespot.Logger, ref spotif
 			}
 		}
 	}
+	return walkContext(ctx, env, log, spotCtx, ref.URI)
+}
 
+// walkContext pages through a context and returns its track URIs in order.
+func walkContext(ctx context.Context, env *Env, log librespot.Logger, spotCtx *connectpb.Context, uri string) ([]string, error) {
 	resolver, err := spclient.NewContextResolver(ctx, log, env.Session.Spclient(), spotCtx)
 	if err != nil {
 		return nil, err
@@ -240,7 +412,7 @@ func contextURIs(ctx context.Context, env *Env, log librespot.Logger, ref spotif
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("resolving %s: %w", ref.URI, err)
+			return nil, fmt.Errorf("resolving %s: %w", uri, err)
 		}
 		for _, track := range tracks {
 			if u := track.GetUri(); strings.HasPrefix(u, "spotify:track:") {
@@ -248,49 +420,74 @@ func contextURIs(ctx context.Context, env *Env, log librespot.Logger, ref spotif
 			}
 		}
 		if len(uris) > maxResolveTracks {
-			return nil, fmt.Errorf("%s has more than %d tracks", ref.URI, maxResolveTracks)
+			return nil, fmt.Errorf("%s has more than %d tracks", uri, maxResolveTracks)
 		}
 	}
 	if len(uris) == 0 {
-		return nil, fmt.Errorf("%s contains no tracks", ref.URI)
+		return nil, fmt.Errorf("%s contains no tracks", uri)
 	}
 	return uris, nil
 }
 
-// likedURIs pages through the account's Liked Songs, newest first.
-func likedURIs(ctx context.Context, env *Env) ([]string, error) {
+// collectionEntry is one live item of a collection set.
+type collectionEntry struct {
+	uri     string
+	addedAt int64
+}
+
+// fetchCollection pages through one collection set. The set "collection" holds
+// both Liked Songs and saved albums; "artist" holds the followed artists.
+func fetchCollection(ctx context.Context, env *Env, set string) ([]collectionEntry, error) {
 	username := env.Session.Username()
-	type item struct {
-		uri     string
-		addedAt int64
-	}
-	var items []item
+	var entries []collectionEntry
 	token := ""
 	for page := 0; ; page++ {
 		if page >= collectionMaxPages {
-			return nil, fmt.Errorf("Liked Songs still paging after %d pages", collectionMaxPages)
+			return nil, fmt.Errorf("collection set %s still paging after %d pages", set, collectionMaxPages)
 		}
-		resp, err := env.Session.Spclient().CollectionPage(ctx, username, spclient.CollectionSetLikedSongs, token, collectionPageSize)
+		resp, err := env.Session.Spclient().CollectionPage(ctx, username, set, token, collectionPageSize)
 		if err != nil {
-			return nil, fmt.Errorf("reading Liked Songs: %w", err)
+			return nil, fmt.Errorf("reading collection %s: %w", set, err)
 		}
 		for _, it := range resp.GetItems() {
-			if it.GetIsRemoved() || !strings.HasPrefix(it.GetUri(), "spotify:track:") {
+			if it.GetIsRemoved() || it.GetUri() == "" {
 				continue
 			}
-			items = append(items, item{uri: it.GetUri(), addedAt: it.GetAddedAt()})
+			entries = append(entries, collectionEntry{uri: it.GetUri(), addedAt: it.GetAddedAt()})
 		}
 		token = resp.GetNextPageToken()
 		if token == "" {
 			break
 		}
 	}
+	return entries, nil
+}
 
-	sort.SliceStable(items, func(i, j int) bool { return items[i].addedAt > items[j].addedAt })
-	uris := make([]string, 0, len(items))
-	for _, it := range items {
-		uris = append(uris, it.uri)
+// collectionURIs returns the URIs of one entity type, most recently added
+// first.
+func collectionURIs(entries []collectionEntry, prefix string) []string {
+	var kept []collectionEntry
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.uri, prefix) {
+			kept = append(kept, entry)
+		}
 	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].addedAt > kept[j].addedAt })
+
+	uris := make([]string, len(kept))
+	for i, entry := range kept {
+		uris[i] = entry.uri
+	}
+	return uris
+}
+
+// likedURIs pages through the account's Liked Songs, newest first.
+func likedURIs(ctx context.Context, env *Env) ([]string, error) {
+	entries, err := fetchCollection(ctx, env, spclient.CollectionSetLikedSongs)
+	if err != nil {
+		return nil, err
+	}
+	uris := collectionURIs(entries, "spotify:track:")
 	if len(uris) == 0 {
 		return nil, errors.New("Liked Songs is empty")
 	}
