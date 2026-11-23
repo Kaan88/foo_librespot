@@ -379,6 +379,16 @@ func (s *Server) stream(ctx context.Context, conn net.Conn, result *spotifyx.Ope
 	}
 
 	s.log.Infof("streamed %d frames (%.3f s) in %s", frames, float64(frames)/44100, time.Since(start).Round(time.Millisecond))
+
+	// Wait until the client has read everything before the handler closes
+	// the pipe: closing a server pipe handle can discard data the client
+	// hasn't read yet, which would cut off the end of the track.
+	// CloseWrite flushes (FlushFileBuffers) and then signals end of stream.
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		if err := cw.CloseWrite(); err != nil {
+			s.log.Debugf("flushing end of stream: %v", err)
+		}
+	}
 }
 
 func (s *Server) writeJSON(w io.Writer, v any) error {
