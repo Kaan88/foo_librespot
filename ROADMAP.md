@@ -48,8 +48,8 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 - Drag and drop or paste `open.spotify.com` / `spotify:` links straight into playlists. This needs a filesystem service for `spotify:` paths.
 
 ### Phase 5: polish (optional): cache, errors, album gain done; Spotify Connect left ⬅ next
-- ✅ Audio cache size setting (preferences: Off..10 GB, default 1 GB, Clear cache; `--cache-mb` at spawn, `config` op live). Needs a check in a real foobar2000.
-- ✅ Clearer errors: `premium_required`, `rate_limited`, `region_unavailable`, `track_unavailable`; popup once per kind; unavailable tracks are skipped. Needs a check in a real foobar2000.
+- ✅ Audio cache size setting (preferences: Off..10 GB, default 1 GB, Clear cache; `--cache-mb` at spawn, `config` op live). Verified in foobar2000 x64 (2026-11-23).
+- ✅ Clearer errors: `premium_required`, `rate_limited`, `region_unavailable`, `track_unavailable`; popup once per kind; unavailable tracks are skipped. Verified in foobar2000 x64 (2026-11-23).
 - ✅ Album ReplayGain values (AUDIO_FILES `default_album_normalization_params`, also from the open header as dynamic info).
 - Spotify Connect: control foobar2000 from the phone (largest item, last).
 
