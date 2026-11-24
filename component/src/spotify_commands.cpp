@@ -3,6 +3,7 @@
 #include "config.h"
 #include "spotify_playlists.h"
 
+#include <SDK/console.h>
 #include <SDK/contextmenu.h>
 #include <SDK/initquit.h>
 #include <SDK/menu.h>
@@ -10,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <thread>
 
 #ifndef NOMINMAX
@@ -44,6 +46,14 @@ public:
 	}
 };
 
+bool is_linked(t_size playlist) {
+	if (playlist == pfc::infinite_size) return false;
+	std::string context;
+	return flp::playlist_context(playlist, context) && !context.empty();
+}
+
+bool active_is_linked() { return is_linked(playlist_manager::get()->get_active_playlist()); }
+
 class detach_command : public mainmenu_commands {
 public:
 	t_uint32 get_command_count() override { return 1; }
@@ -51,6 +61,12 @@ public:
 	void get_name(t_uint32, pfc::string_base& out) override { out = "Detach from Spotify"; }
 	bool get_description(t_uint32, pfc::string_base& out) override {
 		out = "Removes the Spotify sync link from the active playlist; the playlist itself is kept";
+		return true;
+	}
+	// Greyed out unless the active playlist is linked to Spotify.
+	bool get_display(t_uint32 index, pfc::string_base& text, t_uint32& flags) override {
+		get_name(index, text);
+		flags = active_is_linked() ? 0 : mainmenu_commands::flag_disabled;
 		return true;
 	}
 	GUID get_parent() override { return mainmenu_groups::edit; }
@@ -65,43 +81,97 @@ public:
 	}
 };
 
+bool same_items(t_size playlist, metadb_handle_list_cref data) {
+	playlist_manager::ptr manager = playlist_manager::get();
+	if (manager->playlist_get_item_count(playlist) != data.get_count()) return false;
+	metadb_handle_list items;
+	manager->playlist_get_all_items(playlist, items);
+	if (items.get_count() != data.get_count()) return false;
+	for (t_size i = 0; i < items.get_count(); ++i) {
+		if (items[i] != data[i]) return false;
+	}
+	return true;
+}
+
+// The playlist a playlist-level context menu is about. Playlist views and the
+// active-playlist callers mean the active playlist. The Playlist Manager and
+// playlist tabs pass the right-clicked playlist's items without its index, so
+// that playlist is the linked one holding exactly those items (the active one
+// wins a tie, e.g. between two empty playlists). Returns the context URI, or
+// empty when there is no single linked match.
+std::string target_context(metadb_handle_list_cref data, const GUID& caller) {
+	playlist_manager::ptr manager = playlist_manager::get();
+	const t_size active = manager->get_active_playlist();
+	std::string context;
+	if (caller != contextmenu_item::caller_playlist_manager) {
+		if (is_linked(active)) flp::playlist_context(active, context);
+		return context;
+	}
+	if (is_linked(active) && same_items(active, data)) {
+		flp::playlist_context(active, context);
+		return context;
+	}
+	std::string match;
+	size_t matches = 0;
+	const t_size count = manager->get_playlist_count();
+	for (t_size i = 0; i < count; ++i) {
+		std::string candidate;
+		if (!flp::playlist_context(i, candidate) || candidate.empty()) continue;
+		if (!same_items(i, data)) continue;
+		match = candidate;
+		++matches;
+	}
+	return matches == 1 ? match : std::string();
+}
+
+void detach_by_context(const std::string& context) {
+	const t_size playlist = flp::find_playlist_by_context(context);
+	if (playlist == pfc::infinite_size) return;
+	if (flp::detach_playlist(playlist)) {
+		pfc::string8 name;
+		playlist_manager::get()->playlist_get_name(playlist, name);
+		console::print("foo_librespot: detached \"", name.get_ptr(), "\" from Spotify");
+	}
+}
+
 // Right-click on a playlist (tab or Playlist Manager): remove the sync link.
+// Only offered for linked playlists; it acts on the playlist it was opened for.
 class detach_context_node : public contextmenu_item_node_root_leaf {
 public:
+	explicit detach_context_node(std::string context) : m_context(std::move(context)) {}
+
 	bool get_display_data(pfc::string_base& out, unsigned& flags, metadb_handle_list_cref,
 		const GUID&) override {
 		out = "Detach from Spotify";
 		flags = 0;
 		return true;
 	}
-	void execute(metadb_handle_list_cref, const GUID&) override {
-		flp::detach_active_playlist();
-	}
+	void execute(metadb_handle_list_cref, const GUID&) override { detach_by_context(m_context); }
 	bool get_description(pfc::string_base& out) override {
 		out = "Removes the Spotify sync link from this playlist; the playlist itself is kept";
 		return true;
 	}
 	GUID get_guid() override { return guid_detach_context_item; }
 	bool is_mappable_shortcut() override { return false; }
+
+private:
+	std::string m_context;
 };
 
 class detach_context_item : public contextmenu_item_v2 {
 public:
 	unsigned get_num_items() override { return 1; }
 
-	contextmenu_item_node_root* instantiate_item(unsigned, metadb_handle_list_cref,
+	contextmenu_item_node_root* instantiate_item(unsigned, metadb_handle_list_cref data,
 		const GUID& caller) override {
 		if (caller != contextmenu_item::caller_active_playlist &&
 			caller != contextmenu_item::caller_playlist_manager &&
 			caller != contextmenu_item::caller_playlist) {
 			return nullptr;
 		}
-		playlist_manager::ptr manager = playlist_manager::get();
-		const t_size active = manager->get_active_playlist();
-		if (active == pfc::infinite_size) return nullptr;
-		std::string context;
-		if (!flp::playlist_context(active, context) || context.empty()) return nullptr;
-		return new detach_context_node();
+		std::string context = target_context(data, caller);
+		if (context.empty()) return nullptr;
+		return new detach_context_node(std::move(context));
 	}
 
 	GUID get_item_guid(unsigned) override { return guid_detach_context_item; }
@@ -111,8 +181,10 @@ public:
 		return true;
 	}
 	t_enabled_state get_enabled_state(unsigned) override { return contextmenu_item::DEFAULT_ON; }
-	void item_execute_simple(unsigned, const GUID&, metadb_handle_list_cref, const GUID&) override {
-		flp::detach_active_playlist();
+	void item_execute_simple(unsigned, const GUID&, metadb_handle_list_cref data,
+		const GUID& caller) override {
+		const std::string context = target_context(data, caller);
+		if (!context.empty()) detach_by_context(context);
 	}
 	GUID get_parent() override { return contextmenu_groups::utilities; }
 };
@@ -159,7 +231,7 @@ private:
 			}
 			if (now - last >= std::chrono::minutes(interval)) {
 				last = now;
-				fb2k::inMainThread([] { flp::sync_all_tracked_async(); });
+				fb2k::inMainThread([] { flp::sync_all_tracked_async(true); });
 			}
 		}
 	}

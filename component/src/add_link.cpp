@@ -1,7 +1,9 @@
 #include "stdafx.h"
 
+#include "app_cancel_shim.h"
 #include "component_helpers.h"
 #include "resource.h"
+#include "spotify_playlists.h"
 
 #include "bridge/process.h"
 
@@ -11,6 +13,7 @@
 #include <SDK/menu.h>
 #include <SDK/metadb.h>
 #include <SDK/playlist.h>
+#include <SDK/threaded_process.h>
 
 #include <set>
 #include <string>
@@ -118,7 +121,8 @@ std::vector<std::string> split_lines(const std::string& text) {
 	return lines;
 }
 
-void insert_into_active_playlist(const std::vector<flp::track_info>& tracks) {
+// Returns false when the active playlist refused the tracks (locked).
+bool insert_into_active_playlist(const std::vector<flp::track_info>& tracks) {
 	metadb_handle_list handles;
 	metadb_hint_list_v3::ptr hints = metadb_hint_list_v3::create();
 	std::set<std::string> seen;
@@ -135,7 +139,7 @@ void insert_into_active_playlist(const std::vector<flp::track_info>& tracks) {
 		hints->add_hint_forced(handle, info, t_filestats(), false);
 	}
 
-	if (handles.get_count() == 0) return;
+	if (handles.get_count() == 0) return true;
 	hints->on_done();
 
 	playlist_manager::ptr manager = playlist_manager::get();
@@ -145,8 +149,105 @@ void insert_into_active_playlist(const std::vector<flp::track_info>& tracks) {
 		manager->set_active_playlist(playlist);
 	}
 	const t_size base = manager->playlist_get_item_count(playlist);
-	manager->playlist_insert_items(playlist, base, handles, bit_array_true());
+	return manager->playlist_insert_items(playlist, base, handles, bit_array_true()) !=
+		pfc::infinite_size;
 }
+
+// Resolves the links on a worker thread behind foobar2000's progress dialog
+// (Abort stops the bridge request), then inserts on the main thread.
+class resolve_links_process : public threaded_process_callback {
+public:
+	explicit resolve_links_process(std::vector<std::string> inputs) : m_inputs(std::move(inputs)) {}
+
+	void run(threaded_process_status& status, abort_callback& abort) override {
+		flp::cancel_token cancel;
+		cancel.is_aborting = [&abort] { return abort.is_aborting() || flp::app_is_quitting(); };
+
+		try {
+			flp::ensure_bridge_started(abort);
+		} catch (const exception_aborted&) {
+			throw;
+		} catch (const std::exception& error) {
+			m_fatal = error.what();
+			return;
+		}
+
+		// The popup lists one line per link, so the "Spotify: " label the
+		// helpers add would repeat on every line.
+		const auto describe = [](const std::exception& error) {
+			std::string message = flp::user_error_message(error);
+			const std::string label = "Spotify: ";
+			if (message.compare(0, label.size(), label) == 0) message.erase(0, label.size());
+			return message;
+		};
+
+		for (size_t i = 0; i < m_inputs.size(); ++i) {
+			const std::string& input = m_inputs[i];
+			abort.check();
+			status.set_item(input.c_str());
+			status.set_progress(i, m_inputs.size());
+			try {
+				flp::bridge_client client;
+				const std::vector<flp::track_info> tracks = client.resolve(input, cancel);
+				m_resolved.insert(m_resolved.end(), tracks.begin(), tracks.end());
+			} catch (const flp::cancelled&) {
+				throw exception_aborted();
+			} catch (const flp::bridge_error& error) {
+				if (error.code == "not_logged_in") {
+					m_fatal = kNotLoggedInMessage;
+					return;
+				}
+				m_failures += input + ": " + describe(error) + "\n";
+				console::print("foo_librespot: resolve failed for ", input.c_str(), ": ", error.what());
+			} catch (const std::exception& error) {
+				m_failures += input + ": " + describe(error) + "\n";
+				console::print("foo_librespot: resolve failed for ", input.c_str(), ": ", error.what());
+			}
+		}
+		status.set_progress(m_inputs.size(), m_inputs.size());
+	}
+
+	void on_done(ctx_t, bool aborted) override {
+		if (aborted || flp::app_is_quitting()) return;
+		if (!m_fatal.empty()) {
+			popup_message::g_show(m_fatal.c_str(), "foo_librespot", popup_message::icon_error);
+			return;
+		}
+		if (m_resolved.empty()) {
+			const std::string message = m_failures.empty()
+				? "No tracks found in the supplied link(s)."
+				: ("Could not resolve the supplied link(s):\n" + m_failures);
+			popup_message::g_show(message.c_str(), "foo_librespot", popup_message::icon_error);
+			return;
+		}
+
+		try {
+			if (!insert_into_active_playlist(m_resolved)) {
+				const t_size active = playlist_manager::get()->get_active_playlist();
+				const char* message = flp::is_sync_locked(active)
+					? "The active playlist is synced with Spotify and cannot be edited.\n"
+					  "Detach it from Spotify first, or switch to another playlist."
+					: "The active playlist is locked.";
+				popup_message::g_show(message, "foo_librespot", popup_message::icon_error);
+				return;
+			}
+			console::print("foo_librespot: added ", pfc::format_int(m_resolved.size()).get_ptr(),
+				" track(s) to the active playlist");
+			if (!m_failures.empty()) {
+				popup_message::g_show(("Some links could not be resolved:\n" + m_failures).c_str(),
+					"foo_librespot", popup_message::icon_information);
+			}
+		} catch (const std::exception& error) {
+			popup_message::g_show(error.what(), "foo_librespot", popup_message::icon_error);
+		}
+	}
+
+private:
+	std::vector<std::string> m_inputs;
+	std::vector<flp::track_info> m_resolved;
+	std::string m_failures;
+	std::string m_fatal; // shown instead of anything else (not logged in, no bridge)
+};
 
 class add_link_command : public mainmenu_commands {
 public:
@@ -171,69 +272,16 @@ public:
 		add_link_dialog dialog;
 		if (dialog.run(parent) != IDOK) return;
 
-		const std::vector<std::string> inputs = split_lines(dialog.text);
+		std::vector<std::string> inputs = split_lines(dialog.text);
 		if (inputs.empty()) return;
 
-		try {
-			flp::ensure_bridge_started(fb2k::noAbort);
-		} catch (const std::exception& error) {
-			popup_message::g_show(error.what(), "foo_librespot", popup_message::icon_error);
-			return;
-		}
-
-		std::vector<flp::track_info> resolved;
-		std::string failures;
-
-		// The popup lists one line per link, so the "Spotify: " label the
-		// helpers add would repeat on every line.
-		const auto describe = [](const std::exception& error) {
-			std::string message = flp::user_error_message(error);
-			const std::string label = "Spotify: ";
-			if (message.compare(0, label.size(), label) == 0) message.erase(0, label.size());
-			return message;
-		};
-
-		for (const std::string& input : inputs) {
-			try {
-				flp::bridge_client client;
-				const std::vector<flp::track_info> tracks =
-					client.resolve(input, flp::make_cancel(fb2k::noAbort));
-				resolved.insert(resolved.end(), tracks.begin(), tracks.end());
-			} catch (const flp::cancelled&) {
-				return;
-			} catch (const flp::bridge_error& error) {
-				if (error.code == "not_logged_in") {
-					popup_message::g_show(kNotLoggedInMessage, "foo_librespot",
-						popup_message::icon_error);
-					return;
-				}
-				failures += input + ": " + describe(error) + "\n";
-				console::print("foo_librespot: resolve failed for ", input.c_str(), ": ", error.what());
-			} catch (const std::exception& error) {
-				failures += input + ": " + describe(error) + "\n";
-				console::print("foo_librespot: resolve failed for ", input.c_str(), ": ", error.what());
-			}
-		}
-
-		if (resolved.empty()) {
-			const std::string message = failures.empty()
-				? "No tracks found in the supplied link(s)."
-				: ("Could not resolve the supplied link(s):\n" + failures);
-			popup_message::g_show(message.c_str(), "foo_librespot", popup_message::icon_error);
-			return;
-		}
-
-		try {
-			insert_into_active_playlist(resolved);
-			console::print("foo_librespot: added ", pfc::format_int(resolved.size()).get_ptr(),
-				" track(s) to the active playlist");
-			if (!failures.empty()) {
-				popup_message::g_show(("Some links could not be resolved:\n" + failures).c_str(),
-					"foo_librespot", popup_message::icon_information);
-			}
-		} catch (const std::exception& error) {
-			popup_message::g_show(error.what(), "foo_librespot", popup_message::icon_error);
-		}
+		// Modeless with a delayed dialog: quick links never flash a window, and
+		// foobar2000 stays usable while a large playlist resolves.
+		threaded_process::g_run_modeless(
+			fb2k::service_new<resolve_links_process>(std::move(inputs)),
+			threaded_process::flag_show_abort | threaded_process::flag_show_progress |
+				threaded_process::flag_show_item | threaded_process::flag_show_delayed,
+			parent, "Adding Spotify links");
 	}
 };
 

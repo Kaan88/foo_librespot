@@ -161,6 +161,7 @@
     <ClCompile Include="src\spotify_playlists.cpp" />
     <ClCompile Include="src\spotify_commands.cpp" />
     <ClCompile Include="src\spotify_tab.cpp" />
+    <ClCompile Include="src\app_cancel_shim.cpp" />
     <ClCompile Include="src\bridge\json.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -183,6 +184,7 @@
     <ClInclude Include="src\error_policy.h" />
     <ClInclude Include="src\sync_plan.h" />
     <ClInclude Include="src\spotify_playlists.h" />
+    <ClInclude Include="src\app_cancel_shim.h" />
     <ClInclude Include="src\spotify_tab.h" />
     <ClInclude Include="src\bridge\json.h" />
     <ClInclude Include="src\bridge\pipe.h" />
