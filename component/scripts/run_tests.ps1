@@ -381,6 +381,7 @@ try {
     Assert ($r.Output -match "debug=true") "spawned bridge receives --debug"
     Assert ($r.Output -match "owned=true") "a spawned bridge is owned"
     Assert ($r.Code -eq 0 -and $r.Output -match "stop result=stopped pipe_reachable=false") "stop_owned shuts down the spawned bridge"
+    Assert ($r.Output -match "restart_refused=true owned_after=false") "no bridge is started again after the final stop"
     Stop-TestBridges
 
     # A bridge another process owns is used but never stopped; a version

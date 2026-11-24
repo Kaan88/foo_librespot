@@ -93,7 +93,7 @@ public:
 		// (and locked) after foobar2000 exits. A bridge another instance owns is
 		// never touched; the bridge itself also refuses a shutdown from anyone
 		// but its parent.
-		switch (bridge_process::instance().stop_owned(3000)) {
+		switch (bridge_process::instance().stop_owned(3000, true)) {
 		case bridge_process::stop_result::not_ours:
 			break;
 		case bridge_process::stop_result::stopped:
@@ -172,6 +172,11 @@ bool log_out_spotify(std::string& error) {
 			error = user_error_message(failure);
 			return false;
 		}
+	} catch (const cancelled&) {
+		// foobar2000 is quitting; `cancelled` is not a std::exception and must
+		// not leave the worker thread.
+		error = "cancelled";
+		return false;
 	} catch (const std::exception& failure) {
 		error = user_error_message(failure);
 		return false;
