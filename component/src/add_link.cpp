@@ -23,7 +23,7 @@ namespace {
 const GUID guid_add_link_command = { 0x8b3b6f0a, 0x51d2, 0x4e77, { 0xa0, 0x4c, 0x6c, 0x1f, 0x2d, 0xc4, 0x9b, 0x33 } };
 
 constexpr char kNotLoggedInMessage[] =
-	"Spotify: not logged in \xE2\x80\x94 Preferences > Tools > foo_librespot";
+	"Spotify: not logged in \xE2\x80\x94 Preferences > Tools > Spotify";
 
 // Plain Win32 dialog: a multiline edit plus OK/Cancel.
 class add_link_dialog {

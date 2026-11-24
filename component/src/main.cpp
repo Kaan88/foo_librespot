@@ -11,7 +11,7 @@ DECLARE_COMPONENT_VERSION(
 	"Spotify tab: Add New UI Element... > Spotify\n"
 	"Synced playlists: Library > Sync Spotify playlists\n"
 	"File > Add Spotify link... adds tracks, albums and playlists.\n"
-	"Bridge settings: Preferences > Tools > foo_librespot\n"
+	"Bridge settings: Preferences > Tools > Spotify\n"
 	"\n"
 	"Requires Spotify Premium. Not affiliated with or endorsed by Spotify.\n"
 	"Audio through go-librespot (https://github.com/devgianlu/go-librespot), GPL-3.0.\n"

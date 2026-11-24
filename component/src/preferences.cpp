@@ -345,14 +345,14 @@ private:
 			}
 		} else {
 			set_status_text("Could not start the login helper: " + error);
-			popup_message::g_show(error.c_str(), "foo_librespot", popup_message::icon_error);
+			popup_message::g_show(error.c_str(), "Spotify", popup_message::icon_error);
 		}
 	}
 
 	void on_logout() {
 		const int answer = MessageBoxW(m_wnd,
 			L"Log out of Spotify? The stored login is deleted; use Log in... to sign in again.",
-			L"foo_librespot", MB_OKCANCEL | MB_ICONQUESTION);
+			L"Spotify", MB_OKCANCEL | MB_ICONQUESTION);
 		if (answer != IDOK) return;
 		++m_status->generation;
 		set_status_text("Logging out...");
@@ -486,7 +486,7 @@ private:
 
 class preferences_page_spotify : public preferences_page_v3 {
 public:
-	const char* get_name() override { return "foo_librespot"; }
+	const char* get_name() override { return "Spotify"; }
 	GUID get_guid() override { return guid_preferences_page; }
 	GUID get_parent_guid() override { return preferences_page::guid_tools; }
 

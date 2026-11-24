@@ -12,7 +12,7 @@ const GUID guid_cfg_report_plays = { 0x3e8d5a62, 0x71c4, 0x4f0b, { 0x9a, 0x2e, 0
 const GUID guid_advconfig_branch = { 0xa41f6c08, 0x2d7e, 0x4b53, { 0x86, 0x1c, 0x9f, 0x03, 0x5e, 0xd2, 0x47, 0xb6 } };
 const GUID guid_advconfig_debug_log = { 0x7b26e9d4, 0x5c83, 0x4a1f, { 0xbd, 0x40, 0x12, 0x8e, 0x6f, 0xa9, 0x35, 0xc1 } };
 
-advconfig_branch_factory g_advconfig_branch("foo_librespot", guid_advconfig_branch,
+advconfig_branch_factory g_advconfig_branch("Spotify", guid_advconfig_branch,
 	advconfig_branch::guid_branch_tools, 0);
 } // namespace
 

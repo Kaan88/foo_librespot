@@ -46,7 +46,7 @@ error_info describe_error(const std::string& code, const std::string& detail, in
 		out.popup = true;
 	} else if (code == "not_logged_in") {
 		out.kind = code;
-		out.message = "Spotify: not logged in \xE2\x80\x94 Preferences > Tools > foo_librespot";
+		out.message = "Spotify: not logged in \xE2\x80\x94 Preferences > Tools > Spotify";
 		out.popup = true;
 	} else if (starts_with(detail, kConnectPrefix)) {
 		// The bridge reports a failed session as "connecting to Spotify failed:

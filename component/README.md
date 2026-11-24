@@ -287,7 +287,7 @@ import path.
   comes back as `unavailable` with `connecting to Spotify failed: <reason>`,
   which the component shows as `Spotify: connecting failed — <reason>`.
 - Bridge replies `not_logged_in`: the input throws
-  `Spotify: not logged in — Preferences > Tools > foo_librespot` and details go
+  `Spotify: not logged in — Preferences > Tools > Spotify` and details go
   to the foobar2000 console.
 - Specific failures (protocol v4, `src/error_policy.cpp`, unit-tested in
   `tools/sync_plan_test`): `premium_required`, `rate_limited` (with the
@@ -305,7 +305,7 @@ import path.
 
 ## Audio cache
 
-Preferences > Tools > foo_librespot: **Audio cache size** (Off, 256 MB, 512 MB,
+Preferences > Tools > Spotify: **Audio cache size** (Off, 256 MB, 512 MB,
 1 GB (default), 2 GB, 5 GB, 10 GB) and **Clear cache**, with the amount cached
 shown next to it. The files are the encrypted audio from Spotify's CDN in
 `%LOCALAPPDATA%\foo_librespot\cache`. The setting is passed to a starting
@@ -328,7 +328,7 @@ to foobar2000 as dynamic info once playback starts, so album gain mode follows.
 src/main.cpp               component identity
 src/input_spotify.cpp      input_entry + decoder (float32 PCM, seek by reopen)
 src/add_link.cpp           File > Add Spotify link... + dialog (threaded_process)
-src/preferences.cpp        Tools > foo_librespot preferences page
+src/preferences.cpp        Tools > Spotify preferences page
 src/spotify_tab.*          Spotify panel (search + library tree) + Default UI element
 src/spotify_tab_cui.cpp    Columns UI panel host (uie::window)
 src/spotify_playlists.*    context property, create/reuse, minimal-diff sync, lock

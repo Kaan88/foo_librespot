@@ -22,7 +22,7 @@ extern cfg_string cfg_playlist_prefix;
 // Report plays to Spotify (listening history, recently played); default on.
 extern cfg_bool cfg_report_plays;
 
-// Advanced > Tools > foo_librespot > Debug logging: the bridge writes debug
+// Advanced > Tools > Spotify > Debug logging: the bridge writes debug
 // lines to bridge.log (passed as --debug, and switched live with `config`).
 extern advconfig_checkbox_factory cfg_debug_log;
 

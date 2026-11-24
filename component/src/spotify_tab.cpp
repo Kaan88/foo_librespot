@@ -913,7 +913,7 @@ private:
 		case library_snapshot::state_t::not_logged_in:
 			m_library.clear();
 			m_library_error =
-				"Spotify: not logged in \xE2\x80\x94 Preferences > Tools > foo_librespot";
+				"Spotify: not logged in \xE2\x80\x94 Preferences > Tools > Spotify";
 			KillTimer(m_wnd, kTimerRetryLibrary);
 			set_status(m_library_error);
 			break;

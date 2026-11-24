@@ -25,10 +25,10 @@ It is built on [go-librespot](https://github.com/devgianlu/go-librespot), an ope
 
 1. Get `foo_librespot.fb2k-component` from the [Releases](../../releases) page, or [build it yourself](#building).
 2. In foobar2000: **File > Preferences > Components > Install...**, pick the file, apply and restart.
-3. **File > Preferences > Tools > foo_librespot > Log in...**. A login window opens; finish the Spotify login there. Your credentials are saved to `%APPDATA%\foo_librespot\credentials.json` on your PC and go nowhere else.
+3. **File > Preferences > Tools > Spotify > Log in...**. A login window opens; finish the Spotify login there. Your credentials are saved to `%APPDATA%\foo_librespot\credentials.json` on your PC and go nowhere else.
 4. Add the panel: in layout editing mode, right-click a panel area and choose **Add New UI Element... > Spotify**. A tab stack next to Playlists / Properties works well.
 
-The same preferences page sets the bitrate, the playlist sync interval, the synced playlist name prefix, the audio cache size and play reporting, and has a **Log out** button. Debug logging for the bridge is under **Preferences > Advanced > Tools > foo_librespot**.
+The same preferences page sets the bitrate, the playlist sync interval, the synced playlist name prefix, the audio cache size and play reporting, and has a **Log out** button. Debug logging for the bridge is under **Preferences > Advanced > Tools > Spotify**.
 
 ### Telling Spotify tracks apart in title formatting
 
