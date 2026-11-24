@@ -22,7 +22,8 @@ struct spotify_link {
 // Surrounding whitespace is ignored. Returns kind none for anything else.
 spotify_link parse_spotify_link(const std::string& text);
 
-// "https://open.spotify.com/track/<id>" for a track/album/playlist/artist URI, else empty.
+// "https://open.spotify.com/track/<id>" for a track/album/playlist/artist URI,
+// ".../collection/tracks" for spotify:user:<name>:collection (Liked Songs), else empty.
 std::string spotify_web_url(const std::string& uri);
 
 } // namespace flp
