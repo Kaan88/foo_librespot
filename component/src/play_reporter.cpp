@@ -126,11 +126,17 @@ public:
 
 	void on_playback_stop(play_control::t_stop_reason reason) override {
 		m_after_eof = reason == play_control::stop_reason_eof;
+		// Only a switch to another track carries the starting command on to
+		// on_playback_new_track; a stop or a failed start must not leave it to
+		// mislabel the next natural advance.
+		std::optional<play_control::t_track_command> command;
+		if (reason == play_control::stop_reason_starting_another) command = m_command;
+		else m_command.reset();
 		if (!m_current) return;
 		switch (reason) {
 		case play_control::stop_reason_eof: finish(flp::play_end::track_done); break;
 		case play_control::stop_reason_starting_another:
-			finish(m_command ? end_from_command(*m_command) : flp::play_end::other_track);
+			finish(command ? end_from_command(*command) : flp::play_end::other_track);
 			break;
 		case play_control::stop_reason_shutting_down: finish(flp::play_end::quit); break;
 		default: finish(flp::play_end::stopped); break;

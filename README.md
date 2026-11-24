@@ -4,7 +4,7 @@
 
 It is built on [go-librespot](https://github.com/devgianlu/go-librespot), an open-source Spotify client library, which runs in a small helper process (`librespot-bridge.exe`) that the component starts and stops on its own.
 
-> Requires a **Spotify Premium** account, **Windows** and **64-bit foobar2000 v2**.
+> Requires a **Spotify Premium** account, **Windows** (64-bit) and **foobar2000 v2**, 64-bit or 32-bit.
 
 ## Features
 

@@ -184,11 +184,13 @@ Products:
 .\scripts\package.ps1 -BridgeExe ..\bridge\bin\librespot-bridge.exe
 ```
 
-Builds Release x64 and produces `dist/foo_librespot.fb2k-component` (a zip).
-The component is x64 only; 32-bit foobar2000 is not supported.
+Builds Release Win32 and x64 and produces `dist/foo_librespot.fb2k-component` (a zip).
+The same 64-bit bridge serves both DLLs, since it runs as its own process.
 
 ```
-x64/foo_librespot.dll      x64 DLL
+foo_librespot.dll          x86 DLL, for 32-bit foobar2000
+librespot-bridge.exe       its helper
+x64/foo_librespot.dll      x64 DLL, for 64-bit foobar2000
 x64/librespot-bridge.exe   its helper
 ```
 
