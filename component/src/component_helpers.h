@@ -20,6 +20,13 @@ void init_bridge_paths();
 // Wraps a foobar2000 abort_callback for the bridge client.
 cancel_token make_cancel(abort_callback& aborter);
 
+// A cancel token for background bridge calls that have no abort_callback of
+// their own (menu actions, caches, play reports). It becomes aborting when
+// foobar2000 quits (initquit::on_quit), so no worker keeps the process alive
+// waiting on the bridge.
+cancel_token app_cancel_token();
+bool app_is_quitting();
+
 // Makes sure the bridge process is up; throws a foobar2000 I/O exception on
 // failure (including "not logged in", which is detected by the caller's first
 // request rather than here).
@@ -49,6 +56,12 @@ bool apply_cache_setting(int cache_mb, bool clear_cache, config_result& out, std
 // (UTF-8). Empty if it cannot be determined.
 std::string default_cache_dir();
 
+// Worker thread. Signs out of Spotify: the bridge's `logout` op when a bridge
+// answers (it deletes credentials.json and drops the session), otherwise the
+// stored credentials.json in %APPDATA%\foo_librespot is deleted directly.
+// Clears the %spotify_liked% set. Returns false with `error` on failure.
+bool log_out_spotify(std::string& error);
+
 // Size in bytes of the cached audio below `cache_dir` (0 if there is none).
 long long cache_folder_bytes(const std::string& cache_dir);
 
@@ -59,6 +72,9 @@ bool clear_cache_folder(const std::string& cache_dir, std::string& error);
 // The user-facing form of a bridge/pipe error ("Spotify: connecting failed —
 // <reason>" and so on), for popups that show an error next to their context.
 std::string user_error_message(const std::exception& error);
+
+// GUID of the Spotify input (input_spotify.cpp), for album_art_extractor_v2.
+const GUID& input_spotify_guid();
 
 // Parses "spotify:track:<id>" paths.
 bool is_spotify_track_path(const char* path);

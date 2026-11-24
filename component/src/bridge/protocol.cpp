@@ -1,5 +1,6 @@
 #include "protocol.h"
 
+#include <atomic>
 #include <cmath>
 
 namespace flp {
@@ -135,7 +136,14 @@ std::string playlist_items_json(const std::vector<playlist_item_ref>& items) {
 	return out;
 }
 
+std::atomic<void (*)()>& library_read_hook() {
+	static std::atomic<void (*)()> hook{nullptr};
+	return hook;
+}
+
 } // namespace
+
+void set_library_read_hook(void (*hook)()) { library_read_hook() = hook; }
 
 bridge_client::bridge_client(std::wstring pipe_name) : m_pipe_name(std::move(pipe_name)) {}
 
@@ -170,6 +178,11 @@ bridge_status bridge_client::status(const cancel_token& ct, unsigned connect_tim
 	out.version = reply.get_string("version");
 	out.product = reply.get_string("product");
 	out.last_error_code = reply.get_string("last_error_code");
+	const long long pid = reply.get_int64("pid", 0);
+	const long long parent = reply.get_int64("parent_pid", 0);
+	out.pid = pid > 0 ? static_cast<unsigned long>(pid) : 0;
+	out.parent_pid = parent > 0 ? static_cast<unsigned long>(parent) : 0;
+	out.debug = reply.get_bool("debug", false);
 	return out;
 }
 
@@ -220,6 +233,7 @@ std::vector<library_section> bridge_client::library(const cancel_token& ct,
 		parsed.items = parse_items(section, "items");
 		out.push_back(std::move(parsed));
 	}
+	if (void (*hook)() = library_read_hook().load()) hook();
 	return out;
 }
 
@@ -379,6 +393,52 @@ config_result bridge_client::config(int cache_mb, bool clear_cache, const cancel
 	out.cache_dir = reply.get_string("cache_dir");
 	out.cache_bytes = reply.get_int64("cache_bytes", 0);
 	return out;
+}
+
+bool bridge_client::config_debug(bool debug, const cancel_token& ct, unsigned connect_timeout_ms,
+	unsigned reply_timeout_ms) {
+	const json::value reply = request(std::string("{\"op\":\"config\",\"debug\":") +
+		(debug ? "true" : "false") + "}", ct, connect_timeout_ms, reply_timeout_ms);
+	return reply.get_bool("debug", false);
+}
+
+void bridge_client::shutdown(const cancel_token& ct, unsigned connect_timeout_ms,
+	unsigned reply_timeout_ms) {
+	request("{\"op\":\"shutdown\"}", ct, connect_timeout_ms, reply_timeout_ms);
+}
+
+void bridge_client::logout(const cancel_token& ct, unsigned connect_timeout_ms,
+	unsigned reply_timeout_ms) {
+	request("{\"op\":\"logout\"}", ct, connect_timeout_ms, reply_timeout_ms);
+}
+
+std::vector<std::string> bridge_client::liked(const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request("{\"op\":\"liked\"}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+	std::vector<std::string> out;
+	if (const json::value* uris = reply.find("uris"); uris != nullptr && uris->is_array()) {
+		out.reserve(uris->array.size());
+		for (const json::value& uri : uris->array) {
+			if (uri.is_string() && !uri.string.empty()) out.push_back(uri.string);
+		}
+	}
+	return out;
+}
+
+void bridge_client::report_play(const play_report& r, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	std::string payload = "{\"op\":\"report_play\",\"uri\":" + json::quote(r.uri);
+	if (!r.context_uri.empty()) payload += ",\"context_uri\":" + json::quote(r.context_uri);
+	payload += ",\"started_at\":" + std::to_string(r.started_at);
+	payload += ",\"ms_played\":" + std::to_string(r.ms_played);
+	payload += ",\"duration_ms\":" + std::to_string(r.duration_ms);
+	if (!r.reason_start.empty()) payload += ",\"reason_start\":" + json::quote(r.reason_start);
+	if (!r.reason_end.empty()) payload += ",\"reason_end\":" + json::quote(r.reason_end);
+	if (r.shuffle) payload += ",\"shuffle\":true";
+	if (!r.audio_format.empty()) payload += ",\"audio_format\":" + json::quote(r.audio_format);
+	payload += "}";
+	request(payload, ct, connect_timeout_ms, reply_timeout_ms);
 }
 
 json::value bridge_client::raw_request(const std::string& payload, const cancel_token& ct,

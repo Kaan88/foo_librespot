@@ -24,6 +24,24 @@ struct bridge_status {
 	// the error code classifying last_error.
 	std::string product;
 	std::string last_error_code;
+	// Optional (v6): the bridge's process id and the --parent-pid it watches
+	// (0 when none or for older bridges), and whether debug logging is on.
+	unsigned long pid = 0;
+	unsigned long parent_pid = 0;
+	bool debug = false;
+};
+
+// One play for the v6 report_play op (see PROTOCOL.md).
+struct play_report {
+	std::string uri;          // spotify:track:ID
+	std::string context_uri;  // playlist/album the track was played from; empty = the track
+	long long started_at = 0; // unix ms
+	long long ms_played = 0;
+	long long duration_ms = 0;
+	std::string reason_start; // clickrow, trackdone, fwdbtn, backbtn, ...
+	std::string reason_end;   // trackdone, endplay, fwdbtn, ...
+	bool shuffle = false;
+	std::string audio_format;
 };
 
 // Reply of the v4 `config` op: the audio cache as the bridge sees it.
@@ -141,6 +159,10 @@ struct open_result {
 	std::unique_ptr<pipe_stream> stream;
 };
 
+// Called (on the calling thread) after every successful `library` read; the
+// component uses it to refresh caches derived from the library. One hook.
+void set_library_read_hook(void (*hook)());
+
 class bridge_client {
 public:
 	explicit bridge_client(std::wstring pipe_name = L"foo_librespot");
@@ -222,6 +244,28 @@ public:
 	// answer bad_request ("unknown op").
 	config_result config(int cache_mb, bool clear_cache, const cancel_token& ct,
 		unsigned connect_timeout_ms = 1500, unsigned reply_timeout_ms = 30000);
+
+	// v6: switches debug logging in bridge.log; answers whether it is on.
+	bool config_debug(bool debug, const cancel_token& ct, unsigned connect_timeout_ms = 1500,
+		unsigned reply_timeout_ms = 10000);
+
+	// v6: asks the bridge to exit. Only the process that started it (its
+	// --parent-pid) may; anyone else gets bad_request.
+	void shutdown(const cancel_token& ct, unsigned connect_timeout_ms = 1000,
+		unsigned reply_timeout_ms = 3000);
+
+	// v6: closes the session and deletes credentials.json.
+	void logout(const cancel_token& ct, unsigned connect_timeout_ms = 1500,
+		unsigned reply_timeout_ms = 15000);
+
+	// v6: the track URIs in Liked Songs.
+	std::vector<std::string> liked(const cancel_token& ct, unsigned connect_timeout_ms = 5000,
+		unsigned reply_timeout_ms = 60000);
+
+	// v6: adds a play to the account's listening history. Sent once; never
+	// call this again for the same play after a failure.
+	void report_play(const play_report& report, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
 
 	// Sends one JSON request line and returns the parsed reply. Used by the
 	// console harness for the fake bridge's test-only ops; production code

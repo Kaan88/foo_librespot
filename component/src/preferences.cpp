@@ -5,6 +5,7 @@
 #include "resource.h"
 
 #include "bridge/process.h"
+#include "liked_cache.h"
 
 #include <SDK/coreDarkMode.h>
 #include <SDK/popup_message.h>
@@ -53,6 +54,7 @@ public:
 			state |= preferences_state::changed;
 		}
 		if (selected_cache_mb() != flp::effective_cache_mb()) state |= preferences_state::changed;
+		if (selected_report_plays() != flp::cfg_report_plays.get()) state |= preferences_state::changed;
 		if (effective_prefix_text() != flp::effective_playlist_prefix()) {
 			state |= preferences_state::changed;
 		}
@@ -65,6 +67,7 @@ public:
 		flp::cfg_bitrate_kbps.set(selected_bitrate());
 		flp::cfg_sync_interval_minutes.set(selected_interval());
 		apply_cache_selection();
+		flp::cfg_report_plays = selected_report_plays();
 		std::string prefix = effective_prefix_text();
 		flp::cfg_playlist_prefix.set(prefix.c_str());
 		SetDlgItemTextW(m_wnd, IDC_PREFIX, flp::wide_from_utf8(prefix).c_str());
@@ -76,6 +79,7 @@ public:
 		set_bitrate_selection(flp::kDefaultBitrateKbps);
 		set_interval_selection(flp::kDefaultSyncIntervalMinutes);
 		set_cache_selection(flp::kDefaultCacheMb);
+		CheckDlgButton(m_wnd, IDC_REPORT_PLAYS, BST_CHECKED);
 		SetDlgItemTextW(m_wnd, IDC_PREFIX, flp::wide_from_utf8(flp::kDefaultPlaylistPrefix).c_str());
 		m_callback->on_state_changed();
 	}
@@ -112,6 +116,8 @@ private:
 		build_cache_choices();
 		SetDlgItemTextW(m_wnd, IDC_PREFIX,
 			flp::wide_from_utf8(flp::effective_playlist_prefix()).c_str());
+		CheckDlgButton(m_wnd, IDC_REPORT_PLAYS,
+			flp::cfg_report_plays.get() ? BST_CHECKED : BST_UNCHECKED);
 
 		refresh_status();
 		refresh_cache_info();
@@ -271,6 +277,12 @@ private:
 			case IDC_REFRESH:
 				if (HIWORD(wparam) == BN_CLICKED) refresh_status();
 				return TRUE;
+			case IDC_LOGOUT:
+				if (HIWORD(wparam) == BN_CLICKED) on_logout();
+				return TRUE;
+			case IDC_REPORT_PLAYS:
+				if (HIWORD(wparam) == BN_CLICKED) m_callback->on_state_changed();
+				return TRUE;
 			case IDC_BITRATE:
 				if (HIWORD(wparam) == CBN_SELCHANGE) m_callback->on_state_changed();
 				return TRUE;
@@ -305,14 +317,68 @@ private:
 
 	void on_login() {
 		std::string error;
-		if (flp::bridge_process::instance().launch_login(error)) {
+		std::intptr_t process = 0;
+		if (flp::bridge_process::instance().launch_login(error, &process)) {
 			++m_status->generation; // keep a pending status probe from overwriting this
-			set_status_text("A login window was opened. Complete the Spotify login there, "
-							"then click Refresh.");
+			set_status_text("A login window was opened. Complete the Spotify login there; "
+							"the status updates when it closes.");
+			if (process != 0) {
+				// The status refreshes by itself once the login window closes.
+				const std::shared_ptr<status_state> state = m_status;
+				fb2k::splitTask([state, process] {
+					bool exited = false;
+					try {
+						exited = flp::wait_process_exit(process, flp::app_cancel_token());
+					} catch (...) {
+					}
+					flp::close_process_handle(process);
+					if (!exited || flp::app_is_quitting()) return;
+					flp::liked_cache_refresh_async();
+					fb2k::inMainThread([state] {
+						HWND target = state->target.load();
+						if (target == nullptr || !IsWindow(target)) return;
+						auto* self = reinterpret_cast<preferences_instance*>(
+							GetWindowLongPtrW(target, GWLP_USERDATA));
+						if (self != nullptr) self->refresh_status();
+					});
+				});
+			}
 		} else {
 			set_status_text("Could not start the login helper: " + error);
 			popup_message::g_show(error.c_str(), "foo_librespot", popup_message::icon_error);
 		}
+	}
+
+	void on_logout() {
+		const int answer = MessageBoxW(m_wnd,
+			L"Log out of Spotify? The stored login is deleted; use Log in... to sign in again.",
+			L"foo_librespot", MB_OKCANCEL | MB_ICONQUESTION);
+		if (answer != IDOK) return;
+		++m_status->generation;
+		set_status_text("Logging out...");
+		const std::shared_ptr<status_state> state = m_status;
+		fb2k::splitTask([state] {
+			std::string error;
+			const bool ok = flp::log_out_spotify(error);
+			if (flp::app_is_quitting()) return;
+			fb2k::inMainThread([state, ok, error] {
+				if (ok) console::print("foo_librespot: logged out of Spotify");
+				HWND target = state->target.load();
+				if (target == nullptr || !IsWindow(target)) return;
+				auto* self = reinterpret_cast<preferences_instance*>(
+					GetWindowLongPtrW(target, GWLP_USERDATA));
+				if (self == nullptr) return;
+				if (ok) {
+					self->refresh_status();
+				} else {
+					self->set_status_text("Logging out failed: " + error);
+				}
+			});
+		});
+	}
+
+	bool selected_report_plays() const {
+		return IsDlgButtonChecked(m_wnd, IDC_REPORT_PLAYS) == BST_CHECKED;
 	}
 
 	void set_status_text(const std::string& text) {

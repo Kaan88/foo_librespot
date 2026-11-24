@@ -4,11 +4,15 @@
 #include "bridge/process.h"
 #include "config.h"
 #include "error_policy.h"
+#include "liked_cache.h"
+#include "version.h"
 
 #include <SDK/console.h>
 #include <SDK/core_api.h>
+#include <SDK/initquit.h>
 #include <SDK/popup_message.h>
 
+#include <atomic>
 #include <filesystem>
 #include <mutex>
 
@@ -54,14 +58,81 @@ std::wstring bridge_exe_near_component() {
 	return beside;
 }
 
+// Set in initquit::on_quit. A plain atomic, so it needs no SDK service and is
+// safe during DLL static initialisation.
+std::atomic<bool> g_quitting{false};
+
+// The debug setting last sent to (or spawned with) our bridge; -1 = none yet.
+std::atomic<int> g_debug_applied{-1};
+
+// Applies the Advanced Preferences debug toggle: a bridge spawned from now on
+// gets --debug, and a running bridge of ours is switched live when the
+// setting changed since it was last applied. Worker threads only.
+void sync_debug_setting() {
+	const bool wanted = cfg_debug_log.get();
+	bridge_process& process = bridge_process::instance();
+	process.set_debug(wanted);
+	const int previous = g_debug_applied.exchange(wanted ? 1 : 0);
+	if (previous == -1 || previous == (wanted ? 1 : 0)) return;
+	if (!process.owns_running_bridge()) return; // another instance's: leave it alone
+	try {
+		bridge_client().config_debug(wanted, app_cancel_token(), 1000, 5000);
+		console::print(wanted ? "foo_librespot: bridge debug logging on"
+							  : "foo_librespot: bridge debug logging off");
+	} catch (const std::exception& error) {
+		console::print("foo_librespot: could not switch bridge debug logging: ", error.what());
+	}
+}
+
+class quit_handler : public initquit {
+public:
+	void on_init() override {}
+	void on_quit() override {
+		g_quitting = true;
+		// Stop the bridge this instance started, so the exe is not left running
+		// (and locked) after foobar2000 exits. A bridge another instance owns is
+		// never touched; the bridge itself also refuses a shutdown from anyone
+		// but its parent.
+		switch (bridge_process::instance().stop_owned(3000)) {
+		case bridge_process::stop_result::not_ours:
+			break;
+		case bridge_process::stop_result::stopped:
+			console::print("foo_librespot: bridge stopped");
+			break;
+		case bridge_process::stop_result::terminated:
+			console::print("foo_librespot: bridge did not stop in time and was terminated");
+			break;
+		case bridge_process::stop_result::failed:
+			console::print("foo_librespot: could not stop the bridge");
+			break;
+		}
+	}
+};
+
+initquit_factory_t<quit_handler> g_quit_handler;
+
 } // namespace
+
+bool app_is_quitting() { return g_quitting.load(); }
+
+cancel_token app_cancel_token() {
+	cancel_token token;
+	token.is_aborting = [] { return g_quitting.load(); };
+	return token;
+}
 
 void init_bridge_paths() {
 	static std::once_flag once;
 	std::call_once(once, [] {
-		bridge_process::instance().set_exe_path(bridge_exe_near_component());
+		bridge_process& process = bridge_process::instance();
+		process.set_exe_path(bridge_exe_near_component());
 		// A bridge spawned from now on starts with the configured audio cache.
-		bridge_process::instance().set_cache_mb(effective_cache_mb());
+		process.set_cache_mb(effective_cache_mb());
+		process.set_debug(cfg_debug_log.get());
+		process.set_expected_version(FLP_VERSION);
+		process.set_warning_sink([](const std::string& text) {
+			console::print("foo_librespot: ", text.c_str());
+		});
 	});
 }
 
@@ -83,6 +154,47 @@ bool apply_cache_setting(int cache_mb, bool clear_cache, config_result& out, std
 		error = failure.what();
 		return false;
 	}
+}
+
+bool log_out_spotify(std::string& error) {
+	bool done = false;
+	try {
+		init_bridge_paths();
+		if (bridge_process::instance().pipe_reachable(0)) {
+			bridge_client().logout(app_cancel_token());
+			done = true;
+		}
+	} catch (const bridge_error& failure) {
+		// An older bridge has no logout op: fall back to deleting the file.
+		const bool unknown_op = failure.code == "bad_request" &&
+			std::string(failure.what()).find("unknown op") != std::string::npos;
+		if (failure.code != "unsupported" && !unknown_op) {
+			error = user_error_message(failure);
+			return false;
+		}
+	} catch (const std::exception& failure) {
+		error = user_error_message(failure);
+		return false;
+	}
+	if (!done) {
+		wchar_t buffer[MAX_PATH * 2] = {};
+		const DWORD length = GetEnvironmentVariableW(L"APPDATA", buffer,
+			static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])));
+		if (length == 0 || length >= sizeof(buffer) / sizeof(buffer[0])) {
+			error = "%APPDATA% is not set";
+			return false;
+		}
+		const std::filesystem::path file =
+			std::filesystem::path(std::wstring(buffer, length)) / L"foo_librespot" / L"credentials.json";
+		std::error_code ec;
+		std::filesystem::remove(file, ec);
+		if (ec) {
+			error = "Could not delete the stored login: " + ec.message();
+			return false;
+		}
+	}
+	liked_cache_clear();
+	return true;
 }
 
 std::string default_cache_dir() {
@@ -133,7 +245,9 @@ cancel_token make_cancel(abort_callback& aborter) {
 void ensure_bridge_started(abort_callback& aborter) {
 	init_bridge_paths();
 	try {
+		bridge_process::instance().set_debug(cfg_debug_log.get());
 		bridge_process::instance().ensure_running(make_cancel(aborter));
+		sync_debug_setting();
 	} catch (const cancelled&) {
 		throw exception_aborted();
 	} catch (const std::exception& error) {

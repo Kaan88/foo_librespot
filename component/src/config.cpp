@@ -8,12 +8,22 @@ const GUID guid_cfg_bitrate_kbps = { 0x6b0b1a4e, 0x9c31, 0x4c1e, { 0xa7, 0x2d, 0
 const GUID guid_cfg_sync_interval = { 0x2f7c4a91, 0x8b6d, 0x4e02, { 0xa3, 0x5f, 0x7c, 0x18, 0x44, 0x9d, 0xb2, 0x60 } };
 const GUID guid_cfg_cache_mb = { 0x5c1a8e27, 0x40d3, 0x4b9a, { 0x8f, 0x16, 0xd2, 0x73, 0x0a, 0xe9, 0x6b, 0x54 } };
 const GUID guid_cfg_playlist_prefix = { 0x9d4e7b13, 0x3a52, 0x4c8f, { 0xb1, 0x67, 0x0e, 0x9a, 0xd5, 0x24, 0x7c, 0x38 } };
+const GUID guid_cfg_report_plays = { 0x3e8d5a62, 0x71c4, 0x4f0b, { 0x9a, 0x2e, 0x64, 0xb1, 0x0d, 0x58, 0xc3, 0x97 } };
+const GUID guid_advconfig_branch = { 0xa41f6c08, 0x2d7e, 0x4b53, { 0x86, 0x1c, 0x9f, 0x03, 0x5e, 0xd2, 0x47, 0xb6 } };
+const GUID guid_advconfig_debug_log = { 0x7b26e9d4, 0x5c83, 0x4a1f, { 0xbd, 0x40, 0x12, 0x8e, 0x6f, 0xa9, 0x35, 0xc1 } };
+
+advconfig_branch_factory g_advconfig_branch("foo_librespot", guid_advconfig_branch,
+	advconfig_branch::guid_branch_tools, 0);
 } // namespace
 
 cfg_uint cfg_bitrate_kbps(guid_cfg_bitrate_kbps, kDefaultBitrateKbps);
 cfg_uint cfg_sync_interval_minutes(guid_cfg_sync_interval, kDefaultSyncIntervalMinutes);
 cfg_uint cfg_cache_mb(guid_cfg_cache_mb, kDefaultCacheMb);
 cfg_string cfg_playlist_prefix(guid_cfg_playlist_prefix, kDefaultPlaylistPrefix);
+cfg_bool cfg_report_plays(guid_cfg_report_plays, true);
+advconfig_checkbox_factory cfg_debug_log(
+	"Debug logging in bridge.log (%APPDATA%\\foo_librespot)", guid_advconfig_debug_log,
+	guid_advconfig_branch, 0, false);
 
 bool is_valid_bitrate(int kbps) { return kbps == 96 || kbps == 160 || kbps == 320; }
 

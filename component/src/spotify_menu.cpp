@@ -8,6 +8,11 @@
 //     contextmenu_item_simple cannot generate sub-items, so this one item
 //     builds its popup node dynamically from the cached library.
 //
+// Background calls use flp::app_cancel_token(), so they stop when foobar2000
+// quits. The caches are reached through menu_cache::get() inside the tasks,
+// never through a captured `this`, and a task that finishes after quit does
+// not touch them.
+//
 // instantiate_item / context_get_display run on the main thread while the menu
 // is being built and must not block: everything that needs the bridge (the
 // saved state of a track, the editable-playlist list) is cached and refreshed
@@ -17,6 +22,7 @@
 #include "stdafx.h"
 
 #include "component_helpers.h"
+#include "liked_cache.h"
 #include "spotify_links.h"
 #include "spotify_playlists.h"
 
@@ -245,7 +251,7 @@ void action_remove_from_playlist(metadb_handle_list_cref data) {
 		try {
 			flp::ensure_bridge_started(fb2k::mainAborter());
 			flp::bridge_client client;
-			revision = client.playlist_remove(context, refs, flp::cancel_token());
+			revision = client.playlist_remove(context, refs, flp::app_cancel_token());
 		} catch (const flp::cancelled&) {
 			return;
 		} catch (const std::exception& failure) {
@@ -298,17 +304,20 @@ public:
 			if (m_savedInFlight.count(uri) != 0) return;
 			m_savedInFlight.insert(uri);
 		}
-		fb2k::splitTask([this, uri] {
+		fb2k::splitTask([uri] {
+			std::vector<bool> flags;
 			try {
 				flp::ensure_bridge_started(fb2k::mainAborter());
 				flp::bridge_client client;
-				const std::vector<bool> flags = client.saved({ uri }, flp::cancel_token());
-				if (!flags.empty()) set_saved({ uri }, flags[0]);
+				flags = client.saved({ uri }, flp::app_cancel_token());
 			} catch (...) {
 				// The menu then keeps offering both entries; nothing to report.
 			}
-			std::lock_guard<std::mutex> lock(m_mutex);
-			m_savedInFlight.erase(uri);
+			if (flp::app_is_quitting()) return;
+			menu_cache& cache = menu_cache::get();
+			if (!flags.empty()) cache.set_saved({ uri }, flags[0]);
+			std::lock_guard<std::mutex> lock(cache.m_mutex);
+			cache.m_savedInFlight.erase(uri);
 		});
 	}
 
@@ -326,13 +335,13 @@ public:
 			if (m_playlistsLoaded && clock_type::now() - m_playlistsWhen < kPlaylistsTtl) return;
 			m_playlistsInFlight = true;
 		}
-		fb2k::splitTask([this] {
+		fb2k::splitTask([] {
 			std::vector<editable_playlist> found;
 			bool ok = false;
 			try {
 				flp::ensure_bridge_started(fb2k::mainAborter());
 				flp::bridge_client client;
-				for (const flp::library_section& section : client.library(flp::cancel_token())) {
+				for (const flp::library_section& section : client.library(flp::app_cancel_token())) {
 					for (const flp::library_item& item : section.items) {
 						if (item.kind == "playlist" && item.editable) {
 							found.push_back(editable_playlist{ item.uri, item.name });
@@ -342,13 +351,15 @@ public:
 				ok = true;
 			} catch (...) {
 			}
-			std::lock_guard<std::mutex> lock(m_mutex);
+			if (flp::app_is_quitting()) return;
+			menu_cache& cache = menu_cache::get();
+			std::lock_guard<std::mutex> lock(cache.m_mutex);
 			if (ok) {
-				m_playlists = std::move(found);
-				m_playlistsLoaded = true;
-				m_playlistsWhen = clock_type::now();
+				cache.m_playlists = std::move(found);
+				cache.m_playlistsLoaded = true;
+				cache.m_playlistsWhen = clock_type::now();
 			}
-			m_playlistsInFlight = false;
+			cache.m_playlistsInFlight = false;
 		});
 	}
 
@@ -370,9 +381,10 @@ private:
 
 void action_save(const std::vector<std::string>& uris, bool save) {
 	run_bridge_task([uris, save](flp::bridge_client& client) {
-		if (save) client.save(uris, flp::cancel_token());
-		else client.unsave(uris, flp::cancel_token());
+		if (save) client.save(uris, flp::app_cancel_token());
+		else client.unsave(uris, flp::app_cancel_token());
 		menu_cache::get().set_saved(uris, save);
+		flp::liked_cache_note(uris, save); // %spotify_liked%
 		log_line(std::string(save ? "saved " : "removed ") + plural(uris.size(), "track", "tracks") +
 			(save ? " to Liked Songs" : " from Liked Songs"));
 		// Liked Songs playlists pick the change up now.
@@ -391,7 +403,7 @@ void action_open_album(const std::vector<std::string>& uris) {
 	run_bridge_task([uris](flp::bridge_client& client) {
 		const std::vector<std::string> first(uris.begin(),
 			uris.begin() + static_cast<std::ptrdiff_t>(std::min(uris.size(), kInfoBatch)));
-		const std::vector<flp::track_info> infos = client.info(first, flp::cancel_token());
+		const std::vector<flp::track_info> infos = client.info(first, flp::app_cancel_token());
 		std::vector<std::pair<std::string, std::string>> albums; // uri, name
 		std::set<std::string> seen;
 		for (const flp::track_info& track : infos) {
@@ -417,7 +429,7 @@ void action_open_artist(const std::vector<std::string>& uris) {
 	run_bridge_task([uris](flp::bridge_client& client) {
 		const std::vector<std::string> first(uris.begin(),
 			uris.begin() + static_cast<std::ptrdiff_t>(std::min(uris.size(), kInfoBatch)));
-		const std::vector<flp::track_info> infos = client.info(first, flp::cancel_token());
+		const std::vector<flp::track_info> infos = client.info(first, flp::app_cancel_token());
 		std::vector<std::pair<std::string, std::string>> artists; // uri, name
 		std::set<std::string> seen;
 		for (const flp::track_info& track : infos) {
@@ -464,7 +476,7 @@ void action_radio(const std::vector<std::string>& uris) {
 void action_add_to_playlist(const std::vector<std::string>& uris, const std::string& playlist,
 	const std::string& name) {
 	run_bridge_task([uris, playlist, name](flp::bridge_client& client) {
-		client.playlist_add(playlist, uris, flp::cancel_token());
+		client.playlist_add(playlist, uris, flp::app_cancel_token());
 		log_line("added " + plural(uris.size(), "track", "tracks") + " to \"" + name + "\"");
 		// A synced foobar2000 copy of that playlist picks the new tracks up now.
 		fb2k::inMainThread([] { flp::sync_all_tracked_async(); });

@@ -2,11 +2,13 @@
 
 #include "component_helpers.h"
 #include "config.h"
+#include "playback_rules.h"
 
 #include "bridge/process.h"
 
 #include <SDK/input_impl.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -63,12 +65,30 @@ public:
 	}
 
 	void decode_initialize(unsigned p_flags, abort_callback& aborter) {
-		(void)p_flags;
+		// Only real playback may decode: the converter, ReplayGain scanner and
+		// other full decodes would pull whole tracks from Spotify faster than
+		// real time, which the bridge is not meant for. get_info and the
+		// playlist columns keep working; only decoding is refused.
+		if ((p_flags & input_flag_playback) == 0) {
+			static std::atomic<bool> reported{false};
+			if (!reported.exchange(true)) {
+				console::print("foo_librespot: Spotify tracks can only be played; converting, "
+							   "ReplayGain scanning and other non-playback decoding are refused");
+			}
+			throw exception_io_denied(
+				"Spotify tracks can only be played, not converted, scanned or analysed");
+		}
 		open_stream(0, aborter);
 	}
 
 	bool decode_run(audio_chunk& p_chunk, abort_callback& aborter) {
-		if (m_eof || !m_stream) return false;
+		if (!m_stream) return false;
+		if (m_eof) {
+			// The last chunk went out with the end of the stream.
+			m_stream.reset();
+			check_complete();
+			return false;
+		}
 		// Reads that find buffered audio return immediately, so the abort
 		// callback has to be checked here too: a skip must not wait for the
 		// pipe to drain.
@@ -102,8 +122,10 @@ public:
 		const size_t frames = m_pcmBytes.size() / frameBytes;
 		if (frames == 0) {
 			m_stream.reset();
+			check_complete();
 			return false;
 		}
+		m_frames_delivered += static_cast<long long>(frames);
 
 		p_chunk.set_data_32(reinterpret_cast<const float*>(m_pcmBytes.data()),
 			static_cast<t_size>(frames), static_cast<unsigned>(m_channels),
@@ -162,10 +184,7 @@ public:
 
 	static const char* g_get_name() { return "Spotify (foo_librespot)"; }
 
-	static GUID g_get_guid() {
-		static const GUID guid = { 0x2e6f7f19, 0x3f0b, 0x4d3a, { 0x9e, 0x62, 0x2a, 0x8c, 0x51, 0x7d, 0x1c, 0xb4 } };
-		return guid;
-	}
+	static GUID g_get_guid() { return flp::input_spotify_guid(); }
 
 private:
 	void open_stream(long long startMs, abort_callback& aborter) {
@@ -186,11 +205,31 @@ private:
 			m_pending_bitrate = opened.track.bitrate > 0 ? opened.track.bitrate : 0;
 			m_eof = false;
 			m_pcmBytes.clear();
+			m_start_frame = opened.start_frame > 0 ? opened.start_frame : 0;
+			m_frames_delivered = 0;
+			m_header_duration_ms = opened.track.duration_ms > 0 ? opened.track.duration_ms
+																: m_track.duration_ms;
 		} catch (const flp::cancelled&) {
 			throw exception_aborted();
 		} catch (const std::exception& error) {
 			flp::throw_track_error(error, m_path.c_str());
 		}
+	}
+
+	// A stream that ends cleanly but well before the duration the open header
+	// announced was cut off (connection lost, bridge stopped): fail it as a
+	// data error instead of letting foobar2000 move on as if the track had
+	// finished.
+	void check_complete() {
+		const long long missing = flp::missing_tail_ms(m_header_duration_ms, m_start_frame,
+			m_frames_delivered, static_cast<int>(m_sample_rate));
+		if (missing <= 0) return;
+		m_header_duration_ms = 0; // report once
+		pfc::string_formatter text;
+		text << "Spotify: the stream ended " << pfc::format_float(missing / 1000.0, 0, 1)
+			 << " s before the end of the track (connection lost?)";
+		console::print("foo_librespot: ", m_path.c_str(), ": ", text.c_str());
+		throw exception_io_data(text.c_str());
 	}
 
 	// Remembers the open header's ReplayGain values for dynamic info when they
@@ -227,6 +266,9 @@ private:
 	unsigned m_sample_rate = 44100;
 	unsigned m_channels = 2;
 	bool m_eof = false;
+	long long m_start_frame = 0;
+	long long m_frames_delivered = 0;
+	long long m_header_duration_ms = 0;
 	std::vector<unsigned char> m_pcm;
 	std::vector<unsigned char> m_pcmBytes;
 };
@@ -234,3 +276,8 @@ private:
 static input_singletrack_factory_t<input_spotify> g_input_spotify_factory;
 
 } // namespace
+
+const GUID& flp::input_spotify_guid() {
+	static const GUID guid = { 0x2e6f7f19, 0x3f0b, 0x4d3a, { 0x9e, 0x62, 0x2a, 0x8c, 0x51, 0x7d, 0x1c, 0xb4 } };
+	return guid;
+}

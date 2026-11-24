@@ -12,6 +12,7 @@
 #include "protocol.h"
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 
@@ -34,6 +35,19 @@ public:
 	// default (off) applies.
 	void set_cache_mb(int cache_mb);
 
+	// Passes --debug to a spawned bridge.
+	void set_debug(bool debug);
+
+	// The bridge version this client was built with. A bridge already on the
+	// pipe that reports another version, and belongs to another live process,
+	// is reported once through the warning sink.
+	void set_expected_version(std::string version);
+
+	// Receives one-line warnings about the bridge found on the pipe (another
+	// instance's bridge of a different version, a leftover that does not go
+	// away). Called with the internal lock held: it must not call back in.
+	void set_warning_sink(std::function<void(const std::string&)> sink);
+
 	// True when a server accepts connections on our pipe right now. This is
 	// the readiness test: it never sends a request, so it cannot block behind
 	// session creation.
@@ -48,8 +62,22 @@ public:
 	// to start_timeout_ms (default 15 s) for startup.
 	void ensure_running(const cancel_token& ct, unsigned start_timeout_ms = 15000);
 
-	// Launches "librespot-bridge.exe login" in a visible console window.
-	bool launch_login(std::string& error);
+	// Launches "librespot-bridge.exe login" in a visible console window. With
+	// `process`, the caller receives the login process handle and must close it
+	// with close_process_handle().
+	bool launch_login(std::string& error, std::intptr_t* process = nullptr);
+
+	// True when the bridge on the pipe is one this object started (or adopted:
+	// a bridge whose --parent-pid is this process) and it is still running.
+	bool owns_running_bridge();
+
+	enum class stop_result { not_ours, stopped, terminated, failed };
+
+	// Stops the bridge this object started, and only that one: asks it with
+	// the shutdown op (which the bridge accepts from its parent only), waits up
+	// to wait_ms for it to exit and terminates it as a last resort. A bridge
+	// another process started is never touched (not_ours).
+	stop_result stop_owned(unsigned wait_ms = 3000);
 
 	// Closes the handle to a process we started (does not kill it: the bridge
 	// exits by itself when the parent pid goes away).
@@ -59,7 +87,9 @@ private:
 	bool try_status(bridge_status& out, std::string& error, unsigned timeout_ms);
 	bool process_alive_locked();
 	bool pipe_reachable_locked(unsigned timeout_ms);
-	bool spawn_locked(std::string& error, bool new_console);
+	bool spawn_locked(std::string& error, bool new_console, std::intptr_t* login_process);
+	void check_foreign_bridge_locked(const cancel_token& ct);
+	void warn_locked(const std::string& text);
 
 	std::wstring m_pipe_name;
 	mutable std::mutex m_mutex;
@@ -67,9 +97,26 @@ private:
 	std::intptr_t m_process = 0;
 	unsigned long m_exit_code = 0;
 	int m_cache_mb = -1;
+	bool m_debug = false;
+	std::string m_expected_version;
+	std::function<void(const std::string&)> m_warn;
+	// The bridge found on the pipe (not started by us) has been checked; reset
+	// whenever the pipe is found unreachable, so a later bridge is checked too.
+	bool m_foreign_checked = false;
+	bool m_version_warned = false;
 };
 
 std::string utf8_from_wide(const std::wstring& text);
 std::wstring wide_from_utf8(const std::string& text);
+
+// Whether the process `pid` is still running (true when that cannot be told,
+// e.g. access denied).
+bool process_running(unsigned long pid);
+
+// Waits for a process handle (from launch_login) to be signaled; returns true
+// when it exited, false on timeout or cancellation (cancellation is checked
+// every 200 ms; timeout_ms 0 = no limit).
+bool wait_process_exit(std::intptr_t process, const cancel_token& ct, unsigned timeout_ms = 0);
+void close_process_handle(std::intptr_t process);
 
 } // namespace flp

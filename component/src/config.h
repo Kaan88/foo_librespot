@@ -1,6 +1,7 @@
 #pragma once
 
 #include <SDK/cfg_var.h>
+#include <SDK/advconfig_impl.h>
 
 #include <string>
 
@@ -17,6 +18,13 @@ extern cfg_uint cfg_sync_interval_minutes;
 
 // Prefix for generated foobar2000 playlist names (default "Spotify · ").
 extern cfg_string cfg_playlist_prefix;
+
+// Report plays to Spotify (listening history, recently played); default on.
+extern cfg_bool cfg_report_plays;
+
+// Advanced > Tools > foo_librespot > Debug logging: the bridge writes debug
+// lines to bridge.log (passed as --debug, and switched live with `config`).
+extern advconfig_checkbox_factory cfg_debug_log;
 
 constexpr int kDefaultBitrateKbps = 320;
 constexpr int kDefaultSyncIntervalMinutes = 30;

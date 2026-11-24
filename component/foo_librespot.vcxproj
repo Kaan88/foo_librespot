@@ -161,6 +161,11 @@
     <ClCompile Include="src\spotify_playlists.cpp" />
     <ClCompile Include="src\spotify_commands.cpp" />
     <ClCompile Include="src\spotify_tab.cpp" />
+    <ClCompile Include="src\playback_rules.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\liked_cache.cpp" />
+    <ClCompile Include="src\play_reporter.cpp" />
     <ClCompile Include="src\bridge\json.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -188,6 +193,9 @@
     <ClInclude Include="src\bridge\pipe.h" />
     <ClInclude Include="src\bridge\protocol.h" />
     <ClInclude Include="src\bridge\process.h" />
+    <ClInclude Include="src\version.h" />
+    <ClInclude Include="src\playback_rules.h" />
+    <ClInclude Include="src\liked_cache.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src\foo_librespot.rc" />

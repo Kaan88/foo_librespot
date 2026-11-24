@@ -13,14 +13,15 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 // Dialog
 //
 
-IDD_PREFERENCES DIALOGEX 0, 0, 320, 186
+IDD_PREFERENCES DIALOGEX 0, 0, 320, 204
 STYLE DS_SETFONT | WS_CHILD
-FONT 8, "Microsoft Sans Serif", 400, 0, 0x0
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
     LTEXT           "Bridge status:",IDC_STATIC,10,8,60,8
     LTEXT           "Checking...",IDC_STATUS,10,20,300,24
     PUSHBUTTON      "Log in...",IDC_LOGIN,10,48,60,14
     PUSHBUTTON      "Refresh",IDC_REFRESH,76,48,60,14
+    PUSHBUTTON      "Log out",IDC_LOGOUT,142,48,60,14
     LTEXT           "Streaming bitrate:",IDC_STATIC,10,72,68,8
     COMBOBOX        IDC_BITRATE,82,70,110,80,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Sync playlists every:",IDC_STATIC,10,92,68,8
@@ -31,8 +32,10 @@ BEGIN
     COMBOBOX        IDC_CACHE,82,130,110,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     PUSHBUTTON      "Clear cache",IDC_CACHE_CLEAR,198,130,60,14
     LTEXT           "",IDC_CACHE_INFO,82,148,228,10
-    LTEXT           "Playlists linked to Spotify are named <prefix><name>; 0 minutes disables the timer.",
-                    IDC_STATIC,10,166,300,10
+    CONTROL         "Report plays to Spotify (recently played, listening history)",IDC_REPORT_PLAYS,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,164,300,10
+    LTEXT           "Playlists linked to Spotify are named <prefix><name>; Off disables the sync timer.",
+                    IDC_STATIC,10,184,300,10
 END
 
 IDD_ADD_LINK DIALOGEX 0, 0, 360, 208
