@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # The bridge's Go modules (go-librespot, golang.org/x/*, protobuf).
+  - package-ecosystem: gomod
+    directory: /bridge
+    schedule:
+      interval: weekly
+    groups:
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+    open-pull-requests-limit: 5
+
+  # Workflows (CodeQL runs through GitHub's default setup; this covers any
+  # workflow added later).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
