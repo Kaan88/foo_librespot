@@ -31,6 +31,12 @@ struct options_t {
 	bool logged_out = false;
 	bool quiet = false;
 	int cache_mb = 0; // --cache-mb at spawn; changed by the config op
+	// v6: the owning process (--parent-pid), the version status reports
+	// (--version, for the component's version gate) and debug logging.
+	unsigned long parent_pid = 0;
+	std::string version = "0.1.0-fake";
+	bool debug = false;
+	int play_reports = 0; // report_play calls accepted (see test_control)
 } g_options;
 
 // Fake audio cache: URIs opened while the cache is on come "from cache" the
@@ -355,7 +361,10 @@ void handle_connection(HANDLE pipe) {
 		reply += g_options.logged_out ? "false" : "true";
 		reply += g_options.logged_out ? ",\"username\":\"\",\"country\":\"\""
 									  : ",\"username\":\"fake_user\",\"country\":\"TR\"";
-		reply += ",\"version\":\"0.1.0-fake\",\"product\":\"premium\"}";
+		reply += ",\"version\":" + json_quote(g_options.version) + ",\"product\":\"premium\"";
+		reply += ",\"pid\":" + std::to_string(GetCurrentProcessId());
+		reply += ",\"parent_pid\":" + std::to_string(g_options.parent_pid);
+		reply += g_options.debug ? ",\"debug\":true}" : ",\"debug\":false}";
 		write_line(pipe, reply);
 		return;
 	}
@@ -364,7 +373,8 @@ void handle_connection(HANDLE pipe) {
 		op == "library" || op == "search" || op == "artist" || op == "saved" || op == "save" ||
 		op == "unsave" || op == "playlist_add" || op == "radio" || op == "following" ||
 		op == "follow" || op == "unfollow" || op == "playlist_create" ||
-		op == "playlist_rename" || op == "playlist_delete" || op == "playlist_remove")) {
+		op == "playlist_rename" || op == "playlist_delete" || op == "playlist_remove" ||
+		op == "liked" || op == "report_play")) {
 		write_line(pipe, error_reply("not_logged_in", "not logged in"));
 		return;
 	}
@@ -376,10 +386,11 @@ void handle_connection(HANDLE pipe) {
 			if (g_options.cache_mb <= 0) g_cached.clear();
 		}
 		if (request.get_bool("clear_cache", false)) g_cached.clear();
+		if (request.has("debug")) g_options.debug = request.get_bool("debug", false);
 		std::string reply = "{\"ok\":true,\"cache_mb\":" + std::to_string(g_options.cache_mb);
 		reply += ",\"cache_dir\":\"C:/fake/cache\"";
 		reply += ",\"cache_bytes\":" + std::to_string(static_cast<long long>(g_cached.size()) * 1000000);
-		reply += "}";
+		reply += g_options.debug ? ",\"debug\":true}" : ",\"debug\":false}";
 		write_line(pipe, reply);
 		return;
 	}
@@ -649,12 +660,68 @@ void handle_connection(HANDLE pipe) {
 		return;
 	}
 
+	// --- protocol v6 -----------------------------------------------------------
+	if (op == "shutdown") {
+		// Like the real bridge: only the process named by --parent-pid may stop it.
+		ULONG client = 0;
+		if (g_options.parent_pid != 0 &&
+			(!GetNamedPipeClientProcessId(pipe, &client) || client != g_options.parent_pid)) {
+			write_line(pipe, error_reply("bad_request",
+				"the bridge belongs to another process; only it can shut the bridge down"));
+			return;
+		}
+		write_line(pipe, "{\"ok\":true}");
+		FlushFileBuffers(pipe);
+		log_line("shutdown by the owning process");
+		std::fflush(stdout);
+		ExitProcess(0);
+	}
+
+	if (op == "logout") {
+		g_options.logged_out = true;
+		write_line(pipe, "{\"ok\":true}");
+		return;
+	}
+
+	if (op == "liked") {
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		std::string reply = "{\"ok\":true,\"uris\":[";
+		bool first = true;
+		for (const std::string& track : g_v2.saved) {
+			if (!first) reply += ',';
+			first = false;
+			reply += json_quote(track);
+		}
+		reply += "]}";
+		write_line(pipe, reply);
+		return;
+	}
+
+	if (op == "report_play") {
+		const long long day = 24LL * 60 * 60 * 1000;
+		const long long played = request.get_int64("ms_played", -1);
+		const long long duration = request.get_int64("duration_ms", 0);
+		if (uri.rfind("spotify:track:", 0) != 0 || request.get_int64("started_at", 0) <= 0 ||
+			played < 0 || played > day || duration < 0 || duration > day) {
+			write_line(pipe, error_reply("bad_request", "report_play needs a track, started_at and ms_played"));
+			return;
+		}
+		{
+			std::lock_guard<std::mutex> lock(g_v2.mutex);
+			++g_options.play_reports;
+		}
+		write_line(pipe, "{\"ok\":true}");
+		return;
+	}
+
 	if (op == "test_control") {
 		std::lock_guard<std::mutex> lock(g_v2.mutex);
 		if (request.has("revision")) g_v2.revision = request.get_string("revision");
 		if (request.has("tracks")) g_v2.track_count = static_cast<int>(request.get_int64("tracks"));
+		if (request.has("logged_out")) g_options.logged_out = request.get_bool("logged_out", false);
 		std::string reply = "{\"ok\":true,\"revision\":" + json_quote(g_v2.revision);
-		reply += ",\"tracks\":" + std::to_string(g_v2.track_count) + "}";
+		reply += ",\"tracks\":" + std::to_string(g_v2.track_count);
+		reply += ",\"play_reports\":" + std::to_string(g_options.play_reports) + "}";
 		write_line(pipe, reply);
 		return;
 	}
@@ -744,7 +811,15 @@ int wmain(int argc, wchar_t** argv) {
 		} else if (arg == L"--cache-mb" && i + 1 < argc) {
 			g_options.cache_mb = _wtoi(argv[++i]);
 		} else if (arg == L"--parent-pid" && i + 1 < argc) {
-			++i; // accepted and ignored
+			g_options.parent_pid = static_cast<unsigned long>(_wtoi64(argv[++i]));
+		} else if (arg == L"--version" && i + 1 < argc) {
+			const std::wstring value = argv[++i];
+			g_options.version.clear();
+			for (const wchar_t c : value) {
+				if (c < 128) g_options.version.push_back(static_cast<char>(c));
+			}
+		} else if (arg == L"--debug") {
+			g_options.debug = true;
 		}
 	}
 

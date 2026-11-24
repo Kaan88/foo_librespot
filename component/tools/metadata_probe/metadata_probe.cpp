@@ -48,6 +48,8 @@ void test_track_metadata() {
 	track.duration_ms = 200040;
 	track.codec = "vorbis";
 	track.bitrate = 320;
+	track.album_uri = "spotify:album:fakealbum000000000001";
+	track.artist_uris = { "spotify:artist:art0000000000000000001", "spotify:artist:art0000000000000000002" };
 	track.has_track_gain = true;
 	track.track_gain_db = -5.64;
 	track.has_track_peak = true;
@@ -75,7 +77,16 @@ void test_track_metadata() {
 		"spotify_uri technical field");
 
 	const char* codec = info.info_get("codec");
-	check(codec != nullptr && std::strcmp(codec, "vorbis") == 0, "codec");
+	check(codec != nullptr && std::strcmp(codec, "Vorbis") == 0, "codec vorbis shows as Vorbis");
+	const char* albumUri = info.info_get("spotify_album_uri");
+	check(albumUri != nullptr && std::strcmp(albumUri, "spotify:album:fakealbum000000000001") == 0,
+		"spotify_album_uri technical field");
+	const char* artistUri = info.info_get("spotify_artist_uri");
+	check(artistUri != nullptr && std::strcmp(artistUri,
+		"spotify:artist:art0000000000000000001, spotify:artist:art0000000000000000002") == 0,
+		"spotify_artist_uri joins several artists");
+	check(flp::codec_display_name("flac") == "FLAC" && flp::codec_display_name("") == "Vorbis" &&
+		flp::codec_display_name("Something") == "Something", "codec display names");
 	check(info.info_get_int("samplerate") == 44100, "samplerate 44100");
 	check(info.info_get_int("channels") == 2, "channels 2");
 	check(info.info_get_int("bitrate") == 320, "bitrate 320 kbps");

@@ -299,6 +299,43 @@ try {
     $r = Invoke-Probe @("--pipe", $loggedOutPipe, "save", "spotify:track:0123456789abcdefghijkl")
     Assert ($r.Code -eq 1 -and $r.Output -match "code=not_logged_in") "v3 writes need a login too"
 
+    # --- protocol v6: owner, liked, play reports, debug, logout ------------
+    $v6Pipe = "foo_librespot_v6"
+    $started += Start-Process -FilePath $fake `
+        -ArgumentList @("--pipe", $v6Pipe, "--duration-ms", "500", "--parent-pid", "$PID", "--quiet") -PassThru
+    Wait-Pipe $v6Pipe
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "status")
+    Assert ($r.Output -match "parent_pid=$PID " -and $r.Output -match "pid=\d+ ") "v6 status reports pid and parent_pid"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "save", "spotify:track:liked000000000000000001")
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "liked")
+    Assert ($r.Code -eq 0 -and $r.Output -match "liked count=1" -and
+        $r.Output -match "liked uri=spotify:track:liked000000000000000001") "liked lists the saved tracks"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "report_play", "spotify:track:liked000000000000000001", "--ms", "45000")
+    Assert ($r.Code -eq 0 -and $r.Output -match "report_play ok") "report_play accepted"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "report_play", "spotify:album:alb0000000000000000001")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=bad_request") "report_play refuses a non-track"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "control")
+    Assert ($r.Output -match "play_reports=1") "one play recorded, the refused one not"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "config", "--debug", "on")
+    Assert ($r.Code -eq 0 -and $r.Output -match "config debug=true") "config switches debug logging on"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "status")
+    Assert ($r.Output -match "debug=true") "status reports debug logging"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "shutdown")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=bad_request") "shutdown refused for a process that does not own the bridge"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "status")
+    Assert ($r.Code -eq 0) "bridge keeps running after a refused shutdown"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "logout")
+    Assert ($r.Code -eq 0 -and $r.Output -match "logout ok") "logout succeeds"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "status")
+    Assert ($r.Output -match "logged_in=false") "status after logout is logged out"
+    $r = Invoke-Probe @("--pipe", $v6Pipe, "liked")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=not_logged_in") "liked needs a login"
+
+    # --- playback rules (truncation, play counting, rate limiter) -----------
+    $r = Invoke-Probe @("rules")
+    if ($r.Code -ne 0) { Write-Host $r.Output.Trim() }
+    Assert ($r.Code -eq 0 -and $r.Output -match "rules failures=0") "playback rules self-test"
+
     # --- metadata mapping (SDK file_info, no host) -------------------------
     $sharedDll = if ($Foobar2000Dir) { Join-Path $Foobar2000Dir "shared.dll" } else { "" }
     if ($sharedDll -and (Test-Path $sharedDll)) {
@@ -338,6 +375,37 @@ try {
     $r = Invoke-Probe @("--pipe", "foo_librespot_spawn2", "spawn", $spawnDir, "--cache-mb", "512")
     Assert ($r.Code -eq 0 -and $r.Output -match "config cache_mb=512 ") "spawned bridge receives --cache-mb"
     Stop-TestBridges
+
+    # Quit: the bridge this process spawned is shut down (owner-only op).
+    $r = Invoke-Probe @("--pipe", "foo_librespot_spawn3", "spawn", $spawnDir, "--debug", "--stop")
+    Assert ($r.Output -match "debug=true") "spawned bridge receives --debug"
+    Assert ($r.Output -match "owned=true") "a spawned bridge is owned"
+    Assert ($r.Code -eq 0 -and $r.Output -match "stop result=stopped pipe_reachable=false") "stop_owned shuts down the spawned bridge"
+    Stop-TestBridges
+
+    # A bridge another process owns is used but never stopped; a version
+    # mismatch is reported once.
+    $foreignPipe = "foo_librespot_foreign"
+    $foreign = Start-Process -FilePath $fake -PassThru `
+        -ArgumentList @("--pipe", $foreignPipe, "--parent-pid", "$PID", "--version", "9.9.9", "--quiet")
+    $started += $foreign
+    Wait-Pipe $foreignPipe
+    $r = Invoke-Probe @("--pipe", $foreignPipe, "spawn", $spawnDir, "--expect-version", "0.3.1", "--stop")
+    Assert ($r.Output -match "warning: .*version 9\.9\.9") "version mismatch with a foreign bridge is reported"
+    Assert ($r.Output -match "owned=false" -and $r.Output -match "stop result=not_ours pipe_reachable=true") `
+        "a foreign bridge is not stopped"
+    Assert (-not $foreign.HasExited) "the foreign bridge process keeps running"
+
+    # A leftover whose foobar2000 has exited: waited for, then reported.
+    $deadPid = 999999
+    while (Get-Process -Id $deadPid -ErrorAction SilentlyContinue) { $deadPid++ }
+    $leftoverPipe = "foo_librespot_leftover"
+    $started += Start-Process -FilePath $fake -PassThru `
+        -ArgumentList @("--pipe", $leftoverPipe, "--parent-pid", "$deadPid", "--quiet")
+    Wait-Pipe $leftoverPipe
+    $r = Invoke-Probe @("--pipe", $leftoverPipe, "spawn", $spawnDir, "--stop")
+    Assert ($r.Output -match "warning: .*left over" -and $r.Output -match "stop result=not_ours") `
+        "a leftover bridge of an exited foobar2000 is reported, not killed"
 
     # --- Python fake bridge ------------------------------------------------
     $pythonCandidates = @(

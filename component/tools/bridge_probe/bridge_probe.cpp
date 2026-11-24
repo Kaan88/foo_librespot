@@ -6,11 +6,16 @@
 //   bridge_probe --pipe NAME play spotify:track:ID [--start-ms N] [--frames N|all]
 //   bridge_probe --pipe NAME play ... --abort-after-ms N
 //   bridge_probe --spawn DIR [--pipe NAME]     (spawns DIR\librespot-bridge.exe)
+//   bridge_probe spawn DIR [--expect-version V] [--debug] [--stop]
+//   bridge_probe --pipe NAME liked | logout | shutdown | config --debug on|off
+//   bridge_probe --pipe NAME report_play spotify:track:ID [--ms N] [--duration N]
+//   bridge_probe rules                         (playback_rules self-test)
 //
 // Exit codes: 0 ok, 1 error, 2 usage, 3 cancelled, 4 verification failed.
 
 #include "../src/bridge/process.h"
 #include "../src/bridge/protocol.h"
+#include "../src/playback_rules.h"
 
 #include <chrono>
 #include <cmath>
@@ -36,9 +41,11 @@ flp::cancel_token deadline_cancel(unsigned milliseconds) {
 }
 
 void print_status(const flp::bridge_status& status) {
-	std::printf("status ok=true logged_in=%s username=%s country=%s version=%s product=%s\n",
+	std::printf("status ok=true logged_in=%s username=%s country=%s version=%s product=%s "
+				"pid=%lu parent_pid=%lu debug=%s\n",
 		status.logged_in ? "true" : "false", status.username.c_str(), status.country.c_str(),
-		status.version.c_str(), status.product.c_str());
+		status.version.c_str(), status.product.c_str(), status.pid, status.parent_pid,
+		status.debug ? "true" : "false");
 }
 
 void print_track(const flp::track_info& track) {
@@ -203,8 +210,9 @@ int run_control(flp::bridge_client& client, const std::string& revision, int tra
 	if (tracks >= 0) payload += ",\"tracks\":" + std::to_string(tracks);
 	payload += "}";
 	const flp::json::value reply = client.raw_request(payload, never_cancel());
-	std::printf("control revision=%s tracks=%lld\n", reply.get_string("revision").c_str(),
-		reply.get_int64("tracks"));
+	std::printf("control revision=%s tracks=%lld play_reports=%lld\n",
+		reply.get_string("revision").c_str(), reply.get_int64("tracks"),
+		reply.get_int64("play_reports", -1));
 	return 0;
 }
 
@@ -317,9 +325,56 @@ int run_config(flp::bridge_client& client, int cacheMb, bool clear) {
 	return 0;
 }
 
-int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int cacheMb) {
+int check(bool ok, const char* what, int& failures) {
+	std::printf("%s rules: %s\n", ok ? "ok" : "FAIL", what);
+	if (!ok) ++failures;
+	return failures;
+}
+
+// Self-test of playback_rules (no bridge needed).
+int run_rules() {
+	int failures = 0;
+	check(flp::truncation_tolerance_ms(60000) == 2000, "tolerance is 2 s for short tracks", failures);
+	check(flp::truncation_tolerance_ms(600000) == 6000, "tolerance is 1 % for long tracks", failures);
+	// 200 s track at 44.1 kHz.
+	check(flp::missing_tail_ms(200000, 0, 200LL * 44100, 44100) == 0, "complete stream", failures);
+	check(flp::missing_tail_ms(200000, 0, 199LL * 44100, 44100) == 0, "1 s short is tolerated", failures);
+	check(flp::missing_tail_ms(200000, 0, 100LL * 44100, 44100) == 100000, "half missing", failures);
+	check(flp::missing_tail_ms(200000, 150LL * 44100, 20LL * 44100, 44100) == 30000,
+		"seek start counts", failures);
+	check(flp::missing_tail_ms(0, 0, 10, 44100) == 0, "unknown duration", failures);
+	check(flp::counts_as_play(30000, 200000, false), "30 s counts", failures);
+	check(!flp::counts_as_play(29000, 200000, false), "29 s of a long track does not", failures);
+	check(flp::counts_as_play(12000, 20000, true), "a short track played to the end counts", failures);
+	check(!flp::counts_as_play(12000, 20000, false), "a short track skipped does not", failures);
+	check(!flp::counts_as_play(500, 800, true), "under 1 s never counts", failures);
+	check(std::string(flp::reason_end_word(flp::play_end::track_done)) == "trackdone" &&
+		std::string(flp::reason_end_word(flp::play_end::next)) == "fwdbtn" &&
+		std::string(flp::reason_end_word(flp::play_end::stopped)) == "endplay", "end reasons", failures);
+	check(std::string(flp::reason_start_word(flp::play_start::clicked)) == "clickrow" &&
+		std::string(flp::reason_start_word(flp::play_start::previous)) == "backbtn", "start reasons", failures);
+	flp::rate_limiter limiter(60000);
+	unsigned suppressed = 0;
+	const bool first = limiter.allow("art", 1000, suppressed);
+	const bool second = limiter.allow("art", 2000, suppressed);
+	const bool third = limiter.allow("art", 3000, suppressed);
+	const bool other = limiter.allow("lookup", 3000, suppressed);
+	const bool later = limiter.allow("art", 62000, suppressed);
+	check(first && !second && !third && other && later && suppressed == 2,
+		"rate limiter holds back and counts", failures);
+	std::printf("rules failures=%d\n", failures);
+	return failures == 0 ? 0 : 4;
+}
+
+int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int cacheMb,
+	const std::string& expectVersion, bool debug, bool stop) {
 	flp::bridge_process process(pipeName);
 	process.set_cache_mb(cacheMb);
+	process.set_debug(debug);
+	if (!expectVersion.empty()) process.set_expected_version(expectVersion);
+	process.set_warning_sink([](const std::string& text) {
+		std::printf("warning: %s\n", text.c_str());
+	});
 	process.set_exe_path(directory + L"\\librespot-bridge.exe");
 	const auto start = std::chrono::steady_clock::now();
 	process.ensure_running(never_cancel(), 12000);
@@ -329,6 +384,20 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int c
 
 	flp::bridge_client client(pipeName);
 	print_status(client.status(never_cancel()));
+	std::printf("owned=%s\n", process.owns_running_bridge() ? "true" : "false");
+	if (stop) {
+		const flp::bridge_process::stop_result result = process.stop_owned(3000);
+		const char* name = "failed";
+		switch (result) {
+		case flp::bridge_process::stop_result::not_ours: name = "not_ours"; break;
+		case flp::bridge_process::stop_result::stopped: name = "stopped"; break;
+		case flp::bridge_process::stop_result::terminated: name = "terminated"; break;
+		default: break;
+		}
+		std::printf("stop result=%s pipe_reachable=%s\n", name,
+			process.pipe_reachable(0) ? "true" : "false");
+		return 0;
+	}
 	if (cacheMb >= 0) return run_config(client, -1, false);
 	return 0;
 }
@@ -336,7 +405,8 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int c
 void usage() {
 	std::printf("usage: bridge_probe [--pipe NAME] <status|info|resolve|library|search|artist|"
 				"saved|save|unsave|playlist_add|following|follow|unfollow|playlist_create|"
-				"playlist_rename|playlist_delete|playlist_remove|radio|control|play|spawn> ...\n");
+				"playlist_rename|playlist_delete|playlist_remove|radio|control|play|spawn|"
+				"liked|logout|shutdown|report_play|rules> ...\n");
 }
 
 } // namespace
@@ -369,15 +439,74 @@ int main(int argc, char** argv) {
 			}
 			const std::string directory = arguments[1];
 			int spawnCacheMb = -1;
-			if (arguments.size() >= 4 && arguments[2] == "--cache-mb") {
-				spawnCacheMb = std::atoi(arguments[3].c_str());
+			std::string expectVersion;
+			bool debug = false;
+			bool stop = false;
+			for (size_t i = 2; i < arguments.size(); ++i) {
+				if (arguments[i] == "--cache-mb" && i + 1 < arguments.size()) {
+					spawnCacheMb = std::atoi(arguments[++i].c_str());
+				} else if (arguments[i] == "--expect-version" && i + 1 < arguments.size()) {
+					expectVersion = arguments[++i];
+				} else if (arguments[i] == "--debug") {
+					debug = true;
+				} else if (arguments[i] == "--stop") {
+					stop = true;
+				}
 			}
-			return run_spawn(std::wstring(directory.begin(), directory.end()), widePipe, spawnCacheMb);
+			return run_spawn(std::wstring(directory.begin(), directory.end()), widePipe, spawnCacheMb,
+				expectVersion, debug, stop);
 		}
+
+		if (mode == "rules") return run_rules();
 
 		flp::bridge_client client(widePipe);
 
 		if (mode == "status") return run_status(client);
+
+		if (mode == "liked") {
+			const std::vector<std::string> uris = client.liked(never_cancel());
+			std::printf("liked count=%zu\n", uris.size());
+			for (const std::string& uri : uris) std::printf("liked uri=%s\n", uri.c_str());
+			return 0;
+		}
+
+		if (mode == "logout") {
+			client.logout(never_cancel());
+			std::printf("logout ok\n");
+			return 0;
+		}
+
+		if (mode == "shutdown") {
+			client.shutdown(never_cancel());
+			std::printf("shutdown ok\n");
+			return 0;
+		}
+
+		if (mode == "report_play") {
+			if (arguments.size() < 2) {
+				usage();
+				return 2;
+			}
+			flp::play_report report;
+			report.uri = arguments[1];
+			report.started_at = 1700000000000LL;
+			report.ms_played = 60000;
+			report.duration_ms = 200000;
+			report.reason_start = "clickrow";
+			report.reason_end = "trackdone";
+			for (size_t i = 2; i < arguments.size(); ++i) {
+				if (arguments[i] == "--ms" && i + 1 < arguments.size()) {
+					report.ms_played = std::atoll(arguments[++i].c_str());
+				} else if (arguments[i] == "--duration" && i + 1 < arguments.size()) {
+					report.duration_ms = std::atoll(arguments[++i].c_str());
+				} else if (arguments[i] == "--started-at" && i + 1 < arguments.size()) {
+					report.started_at = std::atoll(arguments[++i].c_str());
+				}
+			}
+			client.report_play(report, never_cancel());
+			std::printf("report_play ok\n");
+			return 0;
+		}
 
 		if (mode == "config") {
 			int cacheMb = -1;
@@ -387,6 +516,11 @@ int main(int argc, char** argv) {
 					cacheMb = std::atoi(arguments[++i].c_str());
 				} else if (arguments[i] == "--clear") {
 					clear = true;
+				} else if (arguments[i] == "--debug" && i + 1 < arguments.size()) {
+					const bool on = arguments[++i] == "on";
+					std::printf("config debug=%s\n",
+						client.config_debug(on, never_cancel()) ? "true" : "false");
+					return 0;
 				}
 			}
 			return run_config(client, cacheMb, clear);

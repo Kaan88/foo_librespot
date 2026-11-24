@@ -57,6 +57,7 @@
     <ClCompile Include="..\..\src\bridge\pipe.cpp" />
     <ClCompile Include="..\..\src\bridge\protocol.cpp" />
     <ClCompile Include="..\..\src\bridge\process.cpp" />
+    <ClCompile Include="..\..\src\playback_rules.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
