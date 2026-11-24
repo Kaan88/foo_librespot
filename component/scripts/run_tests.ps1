@@ -391,7 +391,7 @@ try {
         -ArgumentList @("--pipe", $foreignPipe, "--parent-pid", "$PID", "--version", "9.9.9", "--quiet")
     $started += $foreign
     Wait-Pipe $foreignPipe
-    $r = Invoke-Probe @("--pipe", $foreignPipe, "spawn", $spawnDir, "--expect-version", "0.3.1", "--stop")
+    $r = Invoke-Probe @("--pipe", $foreignPipe, "spawn", $spawnDir, "--expect-version", "0.4.0", "--stop")
     Assert ($r.Output -match "warning: .*version 9\.9\.9") "version mismatch with a foreign bridge is reported"
     Assert ($r.Output -match "owned=false" -and $r.Output -match "stop result=not_ours pipe_reachable=true") `
         "a foreign bridge is not stopped"

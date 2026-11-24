@@ -415,7 +415,8 @@ private:
 			}
 			// Drop "Search results for ..." or "Searching ..." with the results.
 			if (!m_library_error.empty()) set_status(m_library_error);
-			else if (!m_library_loading) set_status(kLibraryHint);
+			else if (m_library_loading) set_status("Loading Spotify library\xE2\x80\xA6");
+			else set_status(kLibraryHint);
 			return 0;
 		case WM_NCDESTROY: {
 			HWND wnd = m_wnd;
@@ -505,7 +506,7 @@ private:
 			}
 			return code;
 		}
-		if (message == WM_CHAR && (wparam == L'\r' || wparam == 0x1B)) return 0; // no beep
+		if (message == WM_CHAR && (wparam == L'\r' || wparam == L'\n' || wparam == 0x1B)) return 0; // no beep
 		if (message == WM_KEYDOWN && self != nullptr) {
 			if (wparam == VK_RETURN) {
 				PostMessageW(self->m_wnd, kMsgRunSearch, 0, 0);
@@ -523,6 +524,19 @@ private:
 		UINT_PTR, DWORD_PTR reference) {
 		auto* self = reinterpret_cast<spotify_panel_impl*>(reference);
 		if (self != nullptr && self->handle_tab_key(wnd, message, wparam)) return 0;
+		if (self != nullptr && wnd == self->m_tree) {
+			// As in search_subclass: claim Enter so IsDialogMessage hosts let it
+			// reach the tree (TVN_KEYDOWN opens the selected item).
+			if (message == WM_GETDLGCODE) {
+				LRESULT code = DefSubclassProc(wnd, message, wparam, lparam);
+				const auto* msg = reinterpret_cast<const MSG*>(lparam);
+				if (msg != nullptr && msg->message == WM_KEYDOWN && msg->wParam == VK_RETURN) {
+					code |= DLGC_WANTMESSAGE;
+				}
+				return code;
+			}
+			if (message == WM_CHAR && (wparam == L'\r' || wparam == L'\n')) return 0; // no beep
+		}
 		if (message == WM_NCDESTROY) {
 			RemoveWindowSubclass(wnd, &spotify_panel_impl::tab_subclass, 2);
 		}

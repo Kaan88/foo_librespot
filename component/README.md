@@ -16,7 +16,7 @@ foobar2000 v2 component that plays Spotify tracks by talking to the
   `open.spotify.com` URLs into playlist entries
 - Album art: front cover downloaded from the bridge's `cover_url` via
   foobar2000's `http_client`
-- Preferences > Tools > **foo_librespot**: bridge status, Log in..., bitrate,
+- Preferences > Tools > **Spotify**: bridge status, Log in..., bitrate,
   sync interval and playlist name prefix
 
 ## Spotify tab

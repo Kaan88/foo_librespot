@@ -38,7 +38,7 @@ Flags:
                        component passes its setting). Can be changed while
                        running with the "config" op.
   --cache-dir <dir>    Audio cache folder (default
-                       %LOCALAPPDATA%oo_librespot\cache).
+                       %LOCALAPPDATA%\foo_librespot\cache).
   --debug              Log debug output to %APPDATA%\foo_librespot\bridge.log.
   --version            Print the version and exit.
 `
@@ -176,7 +176,7 @@ func runLogin(args []string) int {
 	return 0
 }
 
-// defaultCacheDir is %LOCALAPPDATA%oo_librespot\cache.
+// defaultCacheDir is %LOCALAPPDATA%\foo_librespot\cache.
 func defaultCacheDir() string {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
