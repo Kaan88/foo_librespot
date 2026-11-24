@@ -53,6 +53,14 @@ struct insert_run {
 // the runs in order, each at its `index`, equals applying every insertion.
 std::vector<insert_run> group_insertions(const std::vector<sync_insertion>& insertions);
 
+// Whether the item revisions of library section `section_id` are read from
+// Spotify on every library read, so the sync timer may skip a playlist whose
+// revision did not change. True for Liked Songs and the rootlist sections
+// ("liked", "made_for_you", "playlists"). The other sections (recently played)
+// are described from the bridge's item cache, which keeps the revision it saw
+// first: trusting it would skip a playlist that did change.
+bool section_revisions_are_current(const std::string& section_id);
+
 sync_plan make_sync_plan(const std::vector<std::string>& old_uris,
 	const std::vector<std::string>& new_uris,
 	const std::vector<size_t>& protect_old = std::vector<size_t>());

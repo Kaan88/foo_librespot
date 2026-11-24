@@ -275,6 +275,7 @@ bool bridge_process::probe(bridge_status& out, std::string& error, unsigned time
 void bridge_process::ensure_running(const cancel_token& ct, unsigned start_timeout_ms) {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	ct.check();
+	if (m_final_stop) throw cancelled(); // quitting: the bridge stays stopped
 
 	// Pipe connectability is the whole readiness test. A status request used to
 	// be the test, but status queues behind session creation while the network
@@ -374,8 +375,9 @@ bool bridge_process::owns_running_bridge() {
 	return process_alive_locked();
 }
 
-bridge_process::stop_result bridge_process::stop_owned(unsigned wait_ms) {
+bridge_process::stop_result bridge_process::stop_owned(unsigned wait_ms, bool final_stop) {
 	std::lock_guard<std::mutex> lock(m_mutex);
+	if (final_stop) m_final_stop = true;
 	if (!process_alive_locked()) return stop_result::not_ours;
 
 	HANDLE h = reinterpret_cast<HANDLE>(m_process);

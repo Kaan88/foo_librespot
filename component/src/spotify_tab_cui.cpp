@@ -45,6 +45,8 @@ public:
 			// Transfer to another host: keep the window and its state.
 			ShowWindow(m_panel->get_wnd(), SW_HIDE);
 			SetParent(m_panel->get_wnd(), parent);
+			// The old host must stop treating the window as its own.
+			if (m_host.is_valid()) m_host->relinquish_ownership(m_panel->get_wnd());
 			m_host = host;
 		} else {
 			m_host = host;

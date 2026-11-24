@@ -386,7 +386,7 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int c
 	print_status(client.status(never_cancel()));
 	std::printf("owned=%s\n", process.owns_running_bridge() ? "true" : "false");
 	if (stop) {
-		const flp::bridge_process::stop_result result = process.stop_owned(3000);
+		const flp::bridge_process::stop_result result = process.stop_owned(3000, true);
 		const char* name = "failed";
 		switch (result) {
 		case flp::bridge_process::stop_result::not_ours: name = "not_ours"; break;
@@ -396,6 +396,16 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int c
 		}
 		std::printf("stop result=%s pipe_reachable=%s\n", name,
 			process.pipe_reachable(0) ? "true" : "false");
+		// After the final stop nothing may start a bridge again.
+		bool refused = false;
+		try {
+			process.ensure_running(never_cancel(), 3000);
+		} catch (const flp::cancelled&) {
+			refused = true;
+		} catch (const std::exception&) {
+		}
+		std::printf("restart_refused=%s owned_after=%s\n", refused ? "true" : "false",
+			process.owns_running_bridge() ? "true" : "false");
 		return 0;
 	}
 	if (cacheMb >= 0) return run_config(client, -1, false);

@@ -77,7 +77,11 @@ public:
 	// the shutdown op (which the bridge accepts from its parent only), waits up
 	// to wait_ms for it to exit and terminates it as a last resort. A bridge
 	// another process started is never touched (not_ours).
-	stop_result stop_owned(unsigned wait_ms = 3000);
+	// `final_stop` (foobar2000 is quitting) also makes every later
+	// ensure_running() throw `cancelled` instead of starting a bridge again: a
+	// decoder or album art lookup still running must not respawn the bridge
+	// that was just stopped.
+	stop_result stop_owned(unsigned wait_ms = 3000, bool final_stop = false);
 
 	// Closes the handle to a process we started (does not kill it: the bridge
 	// exits by itself when the parent pid goes away).
@@ -104,6 +108,7 @@ private:
 	// whenever the pipe is found unreachable, so a later bridge is checked too.
 	bool m_foreign_checked = false;
 	bool m_version_warned = false;
+	bool m_final_stop = false; // set by stop_owned(final_stop): never spawn again
 };
 
 std::string utf8_from_wide(const std::wstring& text);

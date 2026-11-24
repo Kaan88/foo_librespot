@@ -18,6 +18,7 @@ namespace {
 constexpr long long kFreshMs = 10 * 60 * 1000;    // re-read after 10 minutes
 constexpr long long kRetryMs = 60 * 1000;         // after a failure
 constexpr long long kSoonMs = 0;                  // refresh requested
+constexpr long long kDiscardedMs = 5 * 1000;      // after a read that was overtaken
 
 long long now_ms() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -59,11 +60,15 @@ void load() {
 	} catch (const bridge_error& error) {
 		// Not logged in: nothing is liked. The refresh after a login fills it.
 		if (error.code == "not_logged_in") ok = true;
-	} catch (const std::exception&) {
+	} catch (...) {
+		// Includes flp::cancelled (foobar2000 is quitting), which is not a
+		// std::exception: nothing may leave this detached thread.
 	}
 
 	std::vector<std::string> changed;
+	bool applied = false;
 	if (ok && generation == g_generation.load()) {
+		applied = true;
 		std::unordered_set<std::string> fresh(uris.begin(), uris.end());
 		std::unique_lock<std::shared_mutex> lock(g_mutex);
 		for (const std::string& uri : g_liked) {
@@ -74,7 +79,9 @@ void load() {
 		}
 		g_liked = std::move(fresh);
 	}
-	g_next_refresh_ms = now_ms() + (ok ? kFreshMs : kRetryMs);
+	// A read that a save/unsave or logout overtook was thrown away: read again
+	// soon instead of leaving the set as it is for the full ten minutes.
+	g_next_refresh_ms = now_ms() + (applied ? kFreshMs : (ok ? kDiscardedMs : kRetryMs));
 	g_loading = false;
 	dispatch_changed(std::move(changed));
 }

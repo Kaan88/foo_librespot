@@ -1412,6 +1412,12 @@ private:
 		case NM_SETFOCUS:
 			acquire_selection();
 			return 0;
+		case NM_KILLFOCUS:
+			// The holder is released with the focus (ui_selection_holder's
+			// contract); kept, a tree refresh would overwrite the selection of
+			// whatever window the user is in now.
+			m_selection.release();
+			return 0;
 		case TVN_SELCHANGEDW: {
 			auto* info = reinterpret_cast<NMTREEVIEWW*>(header);
 			publish_selection(node_from_pointer(info->itemNew.lParam));
