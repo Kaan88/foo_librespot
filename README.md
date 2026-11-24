@@ -13,7 +13,9 @@ It is built on [go-librespot](https://github.com/devgianlu/go-librespot), an ope
 - **Synced playlists**: a Spotify playlist, album or Liked Songs becomes a foobar2000 playlist called `Spotify · <name>`. It stays in step with Spotify (new tracks added, removed ones dropped, order kept) when you open it, on a timer and through **Library > Sync Spotify playlists**. To take tracks out of the Spotify playlist itself, select them and use **Spotify > Remove from Spotify playlist**. You can detach a playlist to keep it as it is.
 - **Right-click Spotify submenu**: Save to / Remove from Liked Songs, Open album, Open artist, Start radio, Add to Spotify playlist, Remove from Spotify playlist, Copy link.
 - **Add links**: **File > Add Spotify link...** takes track, album and playlist links (`spotify:...` or `https://open.spotify.com/...`). You can also paste links or drop them onto a playlist.
-- **Tags, album art and ReplayGain**: title, artists, album, album artist, track/disc number and year; front covers; track and album gain from Spotify's loudness data.
+- **Tags, album art and ReplayGain**: title, artists, album, album artist, track/disc number and year; front covers and artist pictures; track and album gain from Spotify's loudness data.
+- **Liked Songs in title formatting**: `%spotify_liked%` is `1` for tracks in your Liked Songs, so `$if(%spotify_liked%,♥)` works in any column.
+- **Play reporting**: tracks you play in foobar2000 show up in Spotify's Recently played and listening history (can be turned off in the preferences).
 - **Audio cache**: tracks you've played are kept locally (default 1 GB, adjustable from Off to 10 GB), so replays don't need the network.
 - **Clear errors**: messages for "Premium required", "rate limited", "not available in your region" and "track unavailable". Unavailable tracks are skipped instead of stopping playback.
 - Supports dark mode.
@@ -25,11 +27,11 @@ It is built on [go-librespot](https://github.com/devgianlu/go-librespot), an ope
 3. **File > Preferences > Tools > foo_librespot > Log in...**. A login window opens; finish the Spotify login there. Your credentials are saved to `%APPDATA%\foo_librespot\credentials.json` on your PC and go nowhere else.
 4. Add the panel: in layout editing mode, right-click a panel area and choose **Add New UI Element... > Spotify**. A tab stack next to Playlists / Properties works well.
 
-The same preferences page sets the bitrate, the playlist sync interval, the synced playlist name prefix and the audio cache size.
+The same preferences page sets the bitrate, the playlist sync interval, the synced playlist name prefix, the audio cache size and play reporting, and has a **Log out** button. Debug logging for the bridge is under **Preferences > Advanced > Tools > foo_librespot**.
 
 ### Telling Spotify tracks apart in title formatting
 
-Every Spotify track has `%source%` = `Spotify` and the technical field `$info(spotify_uri)`, for example:
+Every Spotify track has `%source%` = `Spotify` and the technical fields `$info(spotify_uri)`, `$info(spotify_album_uri)` and `$info(spotify_artist_uri)`, for example:
 
 ```
 $if($strcmp(%source%,Spotify),Spotify,Local file)
@@ -43,7 +45,7 @@ foobar2000 ── foo_librespot.dll ──(named pipe, JSON + float PCM)── l
 ```
 
 - **[`component/`](component/)**: the foobar2000 component in C++ with the official SDK: input, Spotify panel, playlist sync, menus, preferences.
-- **[`bridge/`](bridge/)**: the helper process in Go. It holds one Spotify session, decodes tracks to 44.1 kHz stereo float PCM and serves them over `\\.\pipe\foo_librespot`, restricted to your Windows user. It quits when foobar2000 does.
+- **[`bridge/`](bridge/)**: the helper process in Go. It holds one Spotify session, decodes tracks to 44.1 kHz stereo float PCM and serves them over `\\.\pipe\foo_librespot`, restricted to your Windows user. foobar2000 shuts it down when it quits (only the bridge it started itself), and it exits by itself if foobar2000 goes away.
 - **[`proto/PROTOCOL.md`](proto/PROTOCOL.md)**: the wire protocol between the two.
 - **[`ROADMAP.md`](ROADMAP.md)**: what's done and what's next.
 
@@ -83,6 +85,8 @@ See [`bridge/README.md`](bridge/README.md) and [`component/README.md`](component
 - Search returns tracks, albums, artists and playlists. Top tracks and top artists aren't reachable from this kind of login, so the panel doesn't show them.
 - Default UI only. There is no Columns UI panel yet.
 - Spotify Connect (controlling foobar2000 from your phone) isn't there yet. It's the next item on the [roadmap](ROADMAP.md).
+- Spotify tracks can only be played. Converting, ReplayGain scanning and other full decodes are refused (tags, art and columns still work).
+- Play reporting follows the desktop client's event format but has only been checked as a dry run, not against a live account.
 - Seek accuracy relies on an internal go-librespot value. If a future go-librespot changes it, seeking stays exact but gets slower.
 
 ## Disclaimer

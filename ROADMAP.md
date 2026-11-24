@@ -56,6 +56,7 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 - ✅ Audio cache size setting (preferences: Off..10 GB, default 1 GB, Clear cache; `--cache-mb` at spawn, `config` op live). Verified in foobar2000 x64 (2026-11-23).
 - ✅ Clearer errors: `premium_required`, `rate_limited`, `region_unavailable`, `track_unavailable`; popup once per kind; unavailable tracks are skipped. Verified in foobar2000 x64 (2026-11-23).
 - ✅ Album ReplayGain values (AUDIO_FILES `default_album_normalization_params`, also from the open header as dynamic info).
+- ✅ Audit follow-ups (bridge protocol v6): the bridge is shut down on quit (owner-only `shutdown`, version check against a foreign bridge), truncated streams fail as data errors, non-playback decoding is refused, `%spotify_liked%` and the album/artist URI fields, shared album art cache with artist pictures and a quieter console, Log out button and debug-log toggle, play reporting (`report_play`; not yet verified live).
 - Spotify Connect: control foobar2000 from the phone (largest item, last).
 
 ## Known issues / fix notes

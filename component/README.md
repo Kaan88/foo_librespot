@@ -96,7 +96,15 @@ Every Spotify track carries:
 - Technical info `spotify_uri`: test with `$info(spotify_uri)`, for example
   `$if($info(spotify_uri),Spotify,Local file)`.
 
-Both are set by `src/metadata.cpp` for preloaded playlist info and by the input
+- Technical info `spotify_album_uri` and `spotify_artist_uri` (several artists
+  joined with `, `).
+- `%spotify_liked%` (a `metadb_display_field_provider`, `src/liked_cache.cpp`):
+  `1` when the track is in Liked Songs. The set comes from the bridge's `liked`
+  op, is re-read every 10 minutes and after a library read or login, and is
+  updated at once by Save/Remove from Liked Songs; changed tracks are redrawn
+  through `metadb_io::dispatch_refresh`.
+
+They are set by `src/metadata.cpp` for preloaded playlist info and by the input
 when a track is first played. The bitrate comes from the preferred-bitrate
 setting in `info` requests and is corrected once from the `open` header through
 `decode_get_dynamic_info()`.
@@ -179,7 +187,13 @@ host. Covered:
   `delete` / `remove` (including stale-index and wrong-URI refusals) and the
   new `recently_played` / `top_tracks` / `top_artists` sections, against both
   fake bridges
-- bridge process spawning (`--parent-pid`, `--pipe`) and pipe wait
+- bridge process spawning (`--parent-pid`, `--pipe`, `--debug`) and pipe wait
+- v6: `status` pid/parent_pid/debug, `liked`, `logout`, `report_play`
+  validation, `config` debug, `shutdown` refused for a non-owner; `stop_owned`
+  shuts down a spawned bridge, leaves a foreign one (another foobar2000) and a
+  leftover of an exited foobar2000 running, and reports a version mismatch
+- `bridge_probe rules`: truncation tolerance, when a play counts, Spotify's
+  reason words and the console rate limiter (`src/playback_rules.cpp`)
 
 Manual client use:
 
@@ -298,6 +312,21 @@ scripts/                   fetch_sdk / build / test / package
 - Pasted and dropped Spotify links go through a `filesystem` service
   (`src/spotify_filesystem.cpp`), not the add-link dialog.
 - `retag` is not supported (virtual tracks).
+- Decoding without `input_flag_playback` (converter, ReplayGain scanner, other
+  full decodes) throws `exception_io_denied`; `get_info` keeps working. A
+  stream that ends cleanly more than 2 s (or 1 %) before the track's duration
+  throws `exception_io_data` instead of counting as finished.
+- On quit (`initquit::on_quit`) the component sends `shutdown` to the bridge it
+  spawned and waits up to 3 s, then terminates that process only. A bridge
+  another foobar2000 instance started is never stopped.
+- Plays are reported through `play_callback_static` (`src/play_reporter.cpp`):
+  30 s or more, or a short track played to its end. Each report is sent once
+  from a worker thread and never retried; the console shows the outcome. Off
+  with "Report plays to Spotify" in the preferences. Not verified against a
+  live account (only the bridge's dry run).
+- Album art: images are cached by URL across tracks (96 images / 48 MB),
+  artist pictures come from the `artist` op, and failures print at most one
+  console line per kind and minute.
 - The Spotify tab, its dark-mode rendering and the playlist sync operate on
   foobar2000 APIs that cannot run outside the host; they are built for
   x64 and the protocol layer/diff are covered by the tests above, but the
