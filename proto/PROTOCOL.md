@@ -291,3 +291,83 @@ service
 in Spotify's order. Items carry URI, name, owner as `subtitle` and image, with
 `track_count: null`. If that service fails, the search still answers its
 tracks, albums and artists and `playlists` is `[]`; the bridge logs a warning.
+
+## v6 additions (bridge lifetime, logout, liked set, play reporting)
+
+Everything below is additive: all earlier requests and fields stay as they are.
+
+### status additions
+
+`status` also answers `"pid":N` (the bridge's process id), `"parent_pid":N`
+(the `--parent-pid` it watches, 0 when none) and `"debug":true` when debug lines
+are being logged (omitted otherwise). With these, a client can tell whether the
+bridge on the pipe is its own, belongs to another live foobar2000 or is left
+over from one that exited.
+
+A bridge started before the user logged in now picks up `credentials.json`
+by itself (checked at most once a second, when `status` is asked or a request
+needs a session), so no restart is needed after `--login`.
+
+### shutdown
+
+```
+{"op":"shutdown"} -> {"ok":true}
+```
+
+Stops the bridge after the reply. Only the process named by `--parent-pid`
+may do this; the bridge identifies the caller from the pipe itself
+(`GetNamedPipeClientProcessId`). Anyone else gets `bad_request`, so one
+foobar2000 instance can never stop a bridge another instance is using. A bridge
+started without `--parent-pid` accepts it from any client.
+
+### logout
+
+```
+{"op":"logout"} -> {"ok":true}
+```
+
+Closes the session, forgets the login and deletes `credentials.json`. Requests
+that need a session answer `not_logged_in` until the user logs in again (which
+the bridge then picks up by itself, see above).
+
+### liked
+
+```
+{"op":"liked"} -> {"ok":true,"uris":["spotify:track:ID",...]}
+```
+
+The track URIs in Liked Songs (collection order, possibly `[]`). Read-only.
+
+### report_play
+
+```
+{"op":"report_play","uri":"spotify:track:ID","context_uri":"spotify:playlist:ID",
+ "started_at":1700000000000,"ms_played":185000,"duration_ms":200040,
+ "reason_start":"clickrow","reason_end":"trackdone","shuffle":false,
+ "audio_format":"vorbis 320"} -> {"ok":true}
+```
+
+Adds a play to the account's listening history (recently played, and what
+Spotify bases recommendations on). The bridge sends one `RawCoreStream` event
+through Spotify's event service (`POST /gabo-receiver-service/v3/events/`),
+built as the desktop client does it (application, client id, device,
+installation and time fragments).
+
+- `uri` must be a track. `context_uri` defaults to the track itself.
+- `started_at` (unix ms) is required. `ms_played` and `duration_ms` must be
+  between 0 and one day.
+- `reason_start` / `reason_end` take Spotify's words: `clickrow`, `trackdone`,
+  `fwdbtn`, `backbtn`, `endplay`, `playbtn`, `remote`, `logout`, `trackerror`,
+  `appload` or `unknown` (the default).
+- Bad input answers `bad_request` and nothing is sent.
+- The event is sent exactly once and never retried: an unknown outcome is an
+  error, so a play is never counted twice.
+- `"dry_run":true` builds the event and returns it without sending:
+  `{"ok":true,"dry_run":true,"request":<request>}` with `<request>` as in
+  `playlist_add`.
+
+### config: debug
+
+`{"op":"config","debug":true}` (or `false`) switches debug logging in
+`bridge.log` on or off without a restart (same as `--debug`). The reply carries
+`"debug":true` while it is on.

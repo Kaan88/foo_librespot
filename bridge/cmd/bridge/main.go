@@ -129,6 +129,10 @@ func run(args []string) int {
 	defer mgr.Close()
 
 	srv := bridge.NewServer(ctx, log, mgr)
+	// The owning foobar2000 stops its bridge on quit (shutdown op) instead of
+	// leaving it to notice the parent's exit, so the exe is not locked during a
+	// component update.
+	srv.SetOwner(*parentPID, stop)
 	if err := serve(srv, *pipeName, path, log); err != nil {
 		log.Errorf("serve: %v", err)
 		fmt.Fprintf(os.Stderr, "librespot-bridge: %v\n", err)

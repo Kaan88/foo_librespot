@@ -41,9 +41,19 @@ type request struct {
 	DryRun   bool   `json:"dry_run"`
 	// Items belongs to playlist_remove.
 	Items []playlistItemRef `json:"items"`
-	// CacheMB and ClearCache belong to config.
-	CacheMB    *int `json:"cache_mb"`
-	ClearCache bool `json:"clear_cache"`
+	// CacheMB, ClearCache and Debug belong to config.
+	CacheMB    *int  `json:"cache_mb"`
+	ClearCache bool  `json:"clear_cache"`
+	Debug      *bool `json:"debug"`
+	// The rest belongs to report_play (v6).
+	ContextURI  string `json:"context_uri"`
+	StartedAt   int64  `json:"started_at"`
+	MsPlayed    int64  `json:"ms_played"`
+	DurationMs  int64  `json:"duration_ms"`
+	ReasonStart string `json:"reason_start"`
+	ReasonEnd   string `json:"reason_end"`
+	Shuffle     bool   `json:"shuffle"`
+	AudioFormat string `json:"audio_format"`
 }
 
 // playlistItemRef is one item of a playlist_remove request. The index is
@@ -64,6 +74,12 @@ type statusResponse struct {
 	// Optional (v4): account product type and the error code of last_error.
 	Product       string `json:"product,omitempty"`
 	LastErrorCode string `json:"last_error_code,omitempty"`
+	// v6: this bridge's process id and the --parent-pid it watches (0 when
+	// none), so a client can tell whether the bridge belongs to it.
+	PID       int `json:"pid"`
+	ParentPID int `json:"parent_pid"`
+	// v6: whether debug lines are written to bridge.log.
+	Debug bool `json:"debug,omitempty"`
 }
 
 // configResponse answers the config op with the cache state.
@@ -72,6 +88,20 @@ type configResponse struct {
 	CacheMB    int    `json:"cache_mb"`
 	CacheDir   string `json:"cache_dir"`
 	CacheBytes int64  `json:"cache_bytes"`
+	Debug      bool   `json:"debug,omitempty"`
+}
+
+// likedResponse answers liked (v6): the track URIs in Liked Songs.
+type likedResponse struct {
+	OK   bool     `json:"ok"`
+	URIs []string `json:"uris"`
+}
+
+// reportPlayResponse answers report_play (v6); a dry run carries the request.
+type reportPlayResponse struct {
+	OK      bool                      `json:"ok"`
+	DryRun  bool                      `json:"dry_run,omitempty"`
+	Request *spotifyx.PlaylistRequest `json:"request,omitempty"`
 }
 
 type tracksResponse struct {

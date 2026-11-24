@@ -40,7 +40,12 @@ const usage = `Usage:
   bridgectl [--pipe <name>] playlist-rename <playlist-uri> <name> [--dry-run]
   bridgectl [--pipe <name>] playlist-delete <playlist-uri> [--dry-run]
   bridgectl [--pipe <name>] playlist-remove <playlist-uri> <index>:<track-uri>... [--dry-run]
-  bridgectl [--pipe <name>] config [--cache-mb N] [--clear-cache]
+  bridgectl [--pipe <name>] config [--cache-mb N] [--clear-cache] [--debug on|off]
+  bridgectl [--pipe <name>] liked
+  bridgectl [--pipe <name>] report-play <track-uri> --started-at MS --ms-played MS [--duration-ms MS]
+                 [--context URI] [--reason-start R] [--reason-end R] [--shuffle] [--format F] --dry-run
+  bridgectl [--pipe <name>] logout
+  bridgectl [--pipe <name>] shutdown
   bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
   bridgectl [--pipe <name>] open-to-wav <uri-or-url> <out.wav> [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 
@@ -61,6 +66,10 @@ Commands:
   playlist-rename   Rename a playlist.
   playlist-delete   Remove a playlist from the library (unfollow).
   playlist-remove   Remove tracks from a playlist by position (index:uri).
+  liked          List the track URIs in Liked Songs.
+  report-play    Show the play event the bridge would send (only --dry-run is allowed here).
+  logout         Forget the login: drop the session and delete credentials.json.
+  shutdown       Stop the bridge (only the process named by --parent-pid may).
   radio          Tracks of a radio seeded by a track, artist, album or playlist.
   open-to-wav    Open a track, print the header and write the PCM to a WAV.
 `
@@ -156,6 +165,14 @@ func run(args []string) int {
 		return doOpen(*pipe, rest[1:])
 	case "config":
 		return doConfig(*pipe, rest[1:])
+	case "liked", "logout", "shutdown":
+		if len(rest) != 1 {
+			fmt.Fprintf(os.Stderr, "bridgectl: %s takes no arguments\n", rest[0])
+			return 2
+		}
+		return doJSON(*pipe, map[string]any{"op": rest[0]})
+	case "report-play":
+		return doReportPlay(*pipe, rest[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "bridgectl: unknown command %q\n\n%s", rest[0], usage)
 		return 2
@@ -167,10 +184,21 @@ func doConfig(pipe string, args []string) int {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	cacheMB := fs.Int("cache-mb", -1, "audio cache limit in MiB (0 = off)")
 	clear := fs.Bool("clear-cache", false, "delete the cached audio")
+	debug := fs.String("debug", "", "debug logging: on or off")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	req := map[string]any{"op": "config"}
+	switch *debug {
+	case "":
+	case "on":
+		req["debug"] = true
+	case "off":
+		req["debug"] = false
+	default:
+		fmt.Fprintln(os.Stderr, "bridgectl: --debug takes on or off")
+		return 2
+	}
 	if *cacheMB >= 0 {
 		req["cache_mb"] = *cacheMB
 	}
@@ -178,6 +206,50 @@ func doConfig(pipe string, args []string) int {
 		req["clear_cache"] = true
 	}
 	return doJSON(pipe, req)
+}
+
+// doReportPlay previews a report_play request. bridgectl only ever sends it
+// as a dry run, so trying the command out cannot put a play into anyone's
+// listening history.
+func doReportPlay(pipe string, args []string) int {
+	var rest []string
+	shuffle, dryRun := false, false
+	for _, a := range args {
+		switch a {
+		case "--shuffle", "-shuffle":
+			shuffle = true
+		case "--dry-run", "-dry-run":
+			dryRun = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	flags, positional := splitFlags(rest)
+	fs := flag.NewFlagSet("report-play", flag.ContinueOnError)
+	startedAt := fs.Int64("started-at", 0, "unix ms when playback started")
+	msPlayed := fs.Int64("ms-played", 0, "ms actually played")
+	durationMs := fs.Int64("duration-ms", 0, "track length in ms")
+	contextURI := fs.String("context", "", "context uri (playlist, album...)")
+	reasonStart := fs.String("reason-start", "", "start reason, e.g. clickrow")
+	reasonEnd := fs.String("reason-end", "", "end reason, e.g. trackdone")
+	format := fs.String("format", "", "audio format, e.g. vorbis 320")
+	if err := fs.Parse(flags); err != nil {
+		return 2
+	}
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, "bridgectl: report-play needs one track uri")
+		return 2
+	}
+	if !dryRun {
+		fmt.Fprintln(os.Stderr, "bridgectl: report-play only runs with --dry-run")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{
+		"op": "report_play", "uri": positional[0], "context_uri": *contextURI,
+		"started_at": *startedAt, "ms_played": *msPlayed, "duration_ms": *durationMs,
+		"reason_start": *reasonStart, "reason_end": *reasonEnd, "shuffle": shuffle,
+		"audio_format": *format, "dry_run": true,
+	})
 }
 
 func doInfo(pipe string, args []string) int {

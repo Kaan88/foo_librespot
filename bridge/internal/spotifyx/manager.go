@@ -98,6 +98,7 @@ type sessionOpener func(ctx context.Context, c *creds.Credentials) (*Env, string
 
 // attempt is one session-creation round every waiting request shares.
 type attempt struct {
+	gen  uint64 // login generation the attempt belongs to
 	done chan struct{}
 	env  *Env
 	err  error
@@ -123,6 +124,13 @@ type Manager struct {
 	closed   bool
 	creds    *creds.Credentials
 	loggedIn bool
+	// loginGen counts logins (and logouts): the connect loop and its attempts
+	// belong to one generation, and a stale one never installs its session.
+	loginGen   uint64
+	loopCancel context.CancelFunc
+	// credsCheckedAt rate-limits re-reading the credentials file while not
+	// logged in (a "login" run by another process writes it).
+	credsCheckedAt time.Time
 	state    string
 	lastErr  string
 	// lastFailure is the last failed creation, returned to requests that arrive
@@ -216,6 +224,7 @@ func (m *Manager) startLocked() {
 	c := m.fixedCreds
 	if c == nil {
 		var err error
+		m.credsCheckedAt = time.Now()
 		c, err = creds.Load()
 		if err != nil {
 			m.loggedIn = false
@@ -225,13 +234,94 @@ func (m *Manager) startLocked() {
 			return
 		}
 	}
+	m.loginLocked(c)
+}
 
+// loginLocked starts a new login generation with c: a connect loop of its own
+// that a logout can stop.
+func (m *Manager) loginLocked(c *creds.Credentials) {
 	m.creds = c
 	m.loggedIn = true
 	m.user = c.Username
 	m.state = StateConnecting
+	m.lastErr = ""
+	m.lastErrCode = ""
+	m.lastFailure = nil
+	m.loginGen++
+	loopCtx, cancel := context.WithCancel(m.ctx)
+	m.loopCancel = cancel
 	m.log.Infof("starting Spotify session in the background as %s", c.Username)
-	go m.connectLoop()
+	go m.connectLoop(loopCtx, m.loginGen, c)
+}
+
+// credsRecheckInterval bounds how often a not-logged-in manager looks for a
+// credentials file again.
+const credsRecheckInterval = time.Second
+
+// reloadCredsLocked picks up a login completed by another process ("login"
+// writes the credentials file while this bridge runs): without it, a bridge
+// started before the login would stay "not logged in" until restarted.
+func (m *Manager) reloadCredsLocked() {
+	if !m.started || m.closed || m.loggedIn || m.fixedCreds != nil {
+		return
+	}
+	if time.Since(m.credsCheckedAt) < credsRecheckInterval {
+		return
+	}
+	m.credsCheckedAt = time.Now()
+	c, err := creds.Load()
+	if err != nil {
+		return
+	}
+	m.log.Infof("credentials appeared; logging in")
+	m.loginLocked(c)
+}
+
+// Logout stops the session, forgets the account and deletes the credentials
+// file, so the bridge answers not_logged_in until "login" runs again (which it
+// then picks up by itself). Streams already open keep their decoder.
+func (m *Manager) Logout() error {
+	m.opMu.Lock()
+	m.mu.Lock()
+	if m.loopCancel != nil {
+		m.loopCancel()
+		m.loopCancel = nil
+	}
+	m.loginGen++
+	env := m.env
+	m.env = nil
+	m.current = nil
+	m.creds = nil
+	m.loggedIn = false
+	m.user = ""
+	m.state = StateError
+	m.lastErr = "not logged in"
+	m.lastErrCode = ""
+	m.lastFailure = nil
+	m.started = true
+	m.credsCheckedAt = time.Now()
+	close(m.invalidate)
+	m.invalidate = make(chan struct{})
+	m.lastCC.Store("")
+	m.product.Store("")
+	fixed := m.fixedCreds != nil
+	m.mu.Unlock()
+	if env != nil {
+		closeEnv(env)
+	}
+	m.opMu.Unlock()
+	m.invalidateLibrary()
+
+	if fixed {
+		// The spike's fixed credentials are not the bridge's file.
+		m.log.Infof("logged out (fixed credentials kept)")
+		return nil
+	}
+	if err := creds.Remove(); err != nil {
+		return fmt.Errorf("deleting the stored credentials: %w", err)
+	}
+	m.log.Infof("logged out; stored credentials deleted")
+	return nil
 }
 
 // Status returns the current snapshot immediately; it never waits for a
@@ -239,6 +329,7 @@ func (m *Manager) startLocked() {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.reloadCredsLocked()
 	return Status{
 		LoggedIn:  m.loggedIn,
 		State:     m.state,
@@ -289,10 +380,10 @@ func (m *Manager) Close() {
 
 // connectLoop keeps one session generation alive: create it, wait until it is
 // invalidated, then create the next one. Failed rounds retry with backoff.
-func (m *Manager) connectLoop() {
+func (m *Manager) connectLoop(ctx context.Context, gen uint64, c *creds.Credentials) {
 	backoff := retryBase
 	for {
-		if m.ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return
 		}
 
@@ -300,18 +391,18 @@ func (m *Manager) connectLoop() {
 		invalidate := m.invalidate
 		m.mu.Unlock()
 
-		a := m.beginAttempt()
+		a := m.beginAttempt(gen)
 		if a == nil {
-			// Close raced with the start of this round.
+			// Close or a logout raced with the start of this round.
 			return
 		}
-		env, user, err := m.openSession(m.ctx, m.creds)
+		env, user, err := m.openSession(ctx, c)
 		m.finishAttempt(a, env, user, err)
 
 		if err == nil {
 			backoff = retryBase
 			select {
-			case <-m.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-invalidate:
 				m.log.Infof("Spotify session was invalidated; reconnecting")
@@ -320,7 +411,7 @@ func (m *Manager) connectLoop() {
 		}
 
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		case <-m.kick:
@@ -332,10 +423,10 @@ func (m *Manager) connectLoop() {
 	}
 }
 
-func (m *Manager) beginAttempt() *attempt {
-	a := &attempt{done: make(chan struct{})}
+func (m *Manager) beginAttempt(gen uint64) *attempt {
+	a := &attempt{gen: gen, done: make(chan struct{})}
 	m.mu.Lock()
-	if m.closed {
+	if m.closed || gen != m.loginGen {
 		m.mu.Unlock()
 		return nil
 	}
@@ -359,8 +450,15 @@ func (m *Manager) finishAttempt(a *attempt, env *Env, user string, err error) {
 	if m.current == a {
 		m.current = nil
 	}
-	closed := m.closed
-	if failure == nil && !closed {
+	stale := a.gen != m.loginGen
+	closed := m.closed || stale
+	if stale {
+		// Logged out (or in again) meanwhile: this attempt's outcome belongs
+		// to nobody. Its session is closed below; the state is left alone.
+		if failure == nil {
+			failure = &ConnectError{Err: errors.New("logged out")}
+		}
+	} else if failure == nil && !closed {
 		m.env = env
 		if user != "" {
 			m.user = user
@@ -422,6 +520,9 @@ func (m *Manager) wait(ctx context.Context) (*Env, error) {
 			env := m.env
 			m.mu.Unlock()
 			return env, nil
+		}
+		if !m.loggedIn {
+			m.reloadCredsLocked()
 		}
 		if !m.loggedIn {
 			msg := m.lastErr

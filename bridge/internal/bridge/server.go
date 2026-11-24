@@ -11,11 +11,13 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 
 	"foo_librespot/bridge/internal/logging"
 	"foo_librespot/bridge/internal/spotifyuri"
@@ -36,12 +38,26 @@ type Server struct {
 	mgr *spotifyx.Manager
 	ctx context.Context
 
+	// parentPID is the process the bridge belongs to (--parent-pid, 0 when
+	// none); only that process may shut it down. shutdown stops the bridge.
+	parentPID int
+	shutdown  func()
+	// clientPID returns the process id of the client on conn; tests replace it.
+	clientPID func(conn net.Conn) (int, bool)
+
 	wg sync.WaitGroup
 }
 
 // NewServer returns a server bound to ctx.
 func NewServer(ctx context.Context, log *logging.Logger, mgr *spotifyx.Manager) *Server {
-	return &Server{log: log, mgr: mgr, ctx: ctx}
+	return &Server{log: log, mgr: mgr, ctx: ctx, clientPID: pipeClientPID}
+}
+
+// SetOwner names the process the bridge belongs to and how to stop it, for the
+// shutdown op. Without it, shutdown answers unsupported.
+func (s *Server) SetOwner(parentPID int, shutdown func()) {
+	s.parentPID = parentPID
+	s.shutdown = shutdown
 }
 
 // PipePath is the Windows path of a pipe name.
@@ -173,6 +189,14 @@ func (s *Server) handle(conn net.Conn) {
 		s.radio(ctx, conn, &req)
 	case "config":
 		s.config(conn, &req)
+	case "shutdown":
+		s.shutdownOp(conn)
+	case "logout":
+		s.logout(conn)
+	case "liked":
+		s.liked(ctx, conn)
+	case "report_play":
+		s.reportPlay(ctx, conn, &req)
 	default:
 		s.writeError(conn, badRequest(fmt.Sprintf("unknown op %q", req.Op)))
 	}
@@ -194,7 +218,86 @@ func (s *Server) status(ctx context.Context, conn net.Conn) {
 
 		Product:       st.Product,
 		LastErrorCode: st.LastErrorCode,
+		PID:           os.Getpid(),
+		ParentPID:     s.parentPID,
+		Debug:         s.log.DebugEnabled(),
 	})
+}
+
+// shutdownOp stops the bridge, but only for the process it belongs to: with
+// several foobar2000 instances on one pipe, an instance that did not start the
+// bridge must not stop it under the one that did. The caller is identified by
+// the pipe itself (GetNamedPipeClientProcessId), not by anything it claims.
+func (s *Server) shutdownOp(conn net.Conn) {
+	if s.shutdown == nil {
+		s.writeError(conn, &apiError{code: CodeUnsupported, msg: "this bridge cannot be shut down remotely"})
+		return
+	}
+	if s.parentPID != 0 {
+		pid, ok := s.clientPID(conn)
+		if !ok || pid != s.parentPID {
+			s.log.Infof("shutdown refused for process %d (the bridge belongs to %d)", pid, s.parentPID)
+			s.writeError(conn, badRequest(fmt.Sprintf(
+				"the bridge belongs to process %d; only it can shut the bridge down", s.parentPID)))
+			return
+		}
+	}
+	s.log.Infof("shutdown requested by the owning process")
+	_ = s.writeJSON(conn, okResponse{OK: true})
+	s.shutdown()
+}
+
+func (s *Server) logout(conn net.Conn) {
+	if err := s.mgr.Logout(); err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, okResponse{OK: true})
+}
+
+func (s *Server) liked(ctx context.Context, conn net.Conn) {
+	uris, err := s.mgr.Liked(ctx)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, likedResponse{OK: true, URIs: uris})
+}
+
+func (s *Server) reportPlay(ctx context.Context, conn net.Conn, req *request) {
+	preview, err := s.mgr.ReportPlay(ctx, spotifyx.PlayReport{
+		URI:         req.URI,
+		ContextURI:  req.ContextURI,
+		StartedAt:   req.StartedAt,
+		MsPlayed:    req.MsPlayed,
+		DurationMs:  req.DurationMs,
+		ReasonStart: req.ReasonStart,
+		ReasonEnd:   req.ReasonEnd,
+		Shuffle:     req.Shuffle,
+		AudioFormat: req.AudioFormat,
+	}, req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	resp := reportPlayResponse{OK: true, DryRun: req.DryRun}
+	if req.DryRun {
+		resp.Request = preview
+	}
+	s.writeJSON(conn, resp)
+}
+
+// pipeClientPID asks Windows which process is on the other end of conn.
+func pipeClientPID(conn net.Conn) (int, bool) {
+	f, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return 0, false
+	}
+	var pid uint32
+	if err := windows.GetNamedPipeClientProcessId(windows.Handle(f.Fd()), &pid); err != nil {
+		return 0, false
+	}
+	return int(pid), true
 }
 
 // config applies settings that can change while the bridge runs and reports
@@ -216,8 +319,17 @@ func (s *Server) config(conn net.Conn, req *request) {
 			return
 		}
 	}
+	if req.Debug != nil && *req.Debug != s.log.DebugEnabled() {
+		s.log.SetDebug(*req.Debug)
+		if *req.Debug {
+			s.log.Infof("debug logging on")
+		} else {
+			s.log.Infof("debug logging off")
+		}
+	}
 	info := s.mgr.CacheSettings()
-	s.writeJSON(conn, configResponse{OK: true, CacheMB: info.MB, CacheDir: info.Dir, CacheBytes: info.Bytes})
+	s.writeJSON(conn, configResponse{OK: true, CacheMB: info.MB, CacheDir: info.Dir, CacheBytes: info.Bytes,
+		Debug: s.log.DebugEnabled()})
 }
 
 func (s *Server) resolve(ctx context.Context, conn net.Conn, req *request) {
@@ -631,6 +743,8 @@ func describe(req *request) string {
 		return fmt.Sprintf("playlist_remove %s with %d items (dry_run=%v)", req.Playlist, len(req.Items), req.DryRun)
 	case "search":
 		return fmt.Sprintf("search %q (limit %d)", req.Query, requestedLimit(req))
+	case "report_play":
+		return fmt.Sprintf("report_play %s (%d ms, %s/%s, dry_run=%v)", uri, req.MsPlayed, req.ReasonStart, req.ReasonEnd, req.DryRun)
 	default:
 		return fmt.Sprintf("%s %s", req.Op, uri)
 	}

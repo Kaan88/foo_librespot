@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
@@ -18,9 +19,9 @@ import (
 // lines with its process id: several bridges (and several generations of one)
 // append to the same log file, so a line without both is impossible to place.
 type Logger struct {
-	mu     sync.Mutex
+	mu     *sync.Mutex
 	out    io.Writer
-	debug  bool
+	debug  *atomic.Bool // shared by every logger derived from the same New
 	prefix string
 	fields []string
 }
@@ -28,11 +29,20 @@ type Logger struct {
 // New returns a logger. With debug enabled, go-librespot's Debugf lines are
 // printed too; trace lines are always dropped.
 func New(out io.Writer, debug bool) *Logger {
-	return &Logger{out: out, debug: debug}
+	l := &Logger{mu: &sync.Mutex{}, out: out, debug: &atomic.Bool{}}
+	l.debug.Store(debug)
+	return l
 }
 
+// SetDebug switches debug output on or off for this logger and every logger
+// derived from it (WithPrefix, WithField, WithError), while running.
+func (l *Logger) SetDebug(debug bool) { l.debug.Store(debug) }
+
+// DebugEnabled reports whether debug lines are written.
+func (l *Logger) DebugEnabled() bool { return l.debug.Load() }
+
 func (l *Logger) logf(level, format string, args ...interface{}) {
-	if level == "TRACE" || (level == "DEBUG" && !l.debug) {
+	if level == "TRACE" || (level == "DEBUG" && !l.debug.Load()) {
 		return
 	}
 
@@ -76,12 +86,12 @@ func (l *Logger) WithError(err error) librespot.Logger {
 // WithPrefix returns a logger that puts "prefix" in front of every line, so
 // lines from different processes writing to one file stay distinguishable.
 func (l *Logger) WithPrefix(prefix string) *Logger {
-	return &Logger{out: l.out, debug: l.debug, prefix: prefix, fields: l.fields}
+	return &Logger{mu: l.mu, out: l.out, debug: l.debug, prefix: prefix, fields: l.fields}
 }
 
 func (l *Logger) with(field string) *Logger {
 	fields := make([]string, len(l.fields), len(l.fields)+1)
 	copy(fields, l.fields)
 	fields = append(fields, field)
-	return &Logger{out: l.out, debug: l.debug, prefix: l.prefix, fields: fields}
+	return &Logger{mu: l.mu, out: l.out, debug: l.debug, prefix: l.prefix, fields: fields}
 }

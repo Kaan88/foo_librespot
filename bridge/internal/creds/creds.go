@@ -116,6 +116,19 @@ func (c *Credentials) Save() error {
 	return nil
 }
 
+// Remove deletes the credentials file (log out). A missing file is not an
+// error.
+func Remove() error {
+	path, err := Path()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // NewDeviceID returns a fresh 20-byte Spotify device id as lowercase hex.
 func NewDeviceID() (string, error) {
 	b := make([]byte, 20)

@@ -78,7 +78,9 @@ librespot-bridge.exe login
 - `--parent-pid` — wait on the process handle and shut down (exit 0) when it is
   signaled. The result is verified with `GetExitCodeProcess` and the exit code
   is logged; a parent that cannot be opened (access denied, still starting) is
-  retried, never assumed dead.
+  retried, never assumed dead. The process named here is also the only client
+  the `shutdown` op accepts (checked with `GetNamedPipeClientProcessId`), so
+  foobar2000 can stop its own bridge on quit but never another instance's.
 - Single instance — if the pipe is connectable (`winio.DialPipe`), a second
   bridge exits 0 immediately. No status round trip is involved.
 - Logs go to `%APPDATA%\foo_librespot\bridge.log` (append, rotated once to
@@ -294,6 +296,20 @@ retry, once, with a fresh revision):
   `platform=WebPlayer&clientVersion=...` (without a client version the service
   answers 400).
 
+### v6: shutdown, logout, liked, report_play
+
+- `status` reports `pid` and `parent_pid`, so the component can tell its own
+  bridge from another instance's or a leftover one.
+- A bridge started before the login picks up `credentials.json` within a
+  second, so logging in from the preferences needs no restart; `logout` drops
+  the session and deletes the file.
+- `liked` lists the Liked Songs track URIs (for `%spotify_liked%`).
+- `report_play` sends one `RawCoreStream` event to
+  `/gabo-receiver-service/v3/events/`, built like the desktop client's
+  (go-librespot ships only a dummy event manager). Sent once, never retried;
+  `dry_run` returns it instead. It has not been verified against Spotify live.
+- `config` takes `debug` to switch debug logging at runtime.
+
 ### Item images
 
 Covers and portraits are the largest `i.scdn.co` image of the metadata. A
@@ -350,12 +366,18 @@ bridgectl [--pipe <name>] playlist-rename <playlist-uri> <name> [--dry-run]
 bridgectl [--pipe <name>] playlist-delete <playlist-uri> [--dry-run]
 bridgectl [--pipe <name>] playlist-remove <playlist-uri> <index>:<track-uri>... [--dry-run]
 bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
+bridgectl [--pipe <name>] config [--cache-mb N] [--clear-cache] [--debug on|off]
+bridgectl [--pipe <name>] liked
+bridgectl [--pipe <name>] report-play <track-uri> --started-at MS --ms-played MS --dry-run
+bridgectl [--pipe <name>] logout
+bridgectl [--pipe <name>] shutdown
 bridgectl [--pipe <name>] open-to-wav <uri> <out.wav>
           [--start-ms N] [--seconds S] [--bitrate 96|160|320]
 ```
 
 `open-to-wav` prints the header (including `start_frame`) and the track info,
 then writes the PCM as 16-bit WAV and reports frames, wall time and peak/RMS.
+`report-play` refuses to run without `--dry-run`.
 
 ## Phase 0 spike
 
