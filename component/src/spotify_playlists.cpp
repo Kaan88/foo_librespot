@@ -695,11 +695,18 @@ void sync_all_tracked_async(bool check_revisions_first) {
 				ensure_bridge_started(fb2k::mainAborter());
 				bridge_client client;
 				for (const library_section& section : client.library(cancel)) {
+					// Recently played (and anything else the bridge describes
+					// from its item cache) keeps the revision it first saw.
+					if (!section_revisions_are_current(section.id)) continue;
 					for (const library_item& item : section.items) {
 						if (item.uri.empty()) continue;
 						listed.emplace(item.uri, std::make_pair(item.revision, item.name));
 					}
 				}
+			} catch (const cancelled&) {
+				// Quitting. Not a std::exception: it must not leave the task.
+				running = false;
+				return;
 			} catch (const std::exception&) {
 				listed.clear(); // fall back to resolving everything
 			}

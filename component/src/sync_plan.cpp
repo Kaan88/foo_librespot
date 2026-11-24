@@ -16,6 +16,10 @@ struct uri_state {
 
 } // namespace
 
+bool section_revisions_are_current(const std::string& section_id) {
+	return section_id == "liked" || section_id == "made_for_you" || section_id == "playlists";
+}
+
 std::vector<insert_run> group_insertions(const std::vector<sync_insertion>& insertions) {
 	std::vector<insert_run> runs;
 	for (const sync_insertion& insertion : insertions) {

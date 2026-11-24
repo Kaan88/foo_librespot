@@ -274,6 +274,14 @@ int main() {
 	test_links();
 	test_error_policy();
 
+	// The sync timer only trusts revisions the bridge reads fresh.
+	check(flp::section_revisions_are_current("liked") &&
+		flp::section_revisions_are_current("made_for_you") &&
+		flp::section_revisions_are_current("playlists"), "rootlist and Liked Songs revisions are trusted");
+	check(!flp::section_revisions_are_current("recently_played") &&
+		!flp::section_revisions_are_current("albums") &&
+		!flp::section_revisions_are_current(""), "cached section revisions are not trusted");
+
 	if (g_failures != 0) {
 		std::printf("%d sync plan test(s) FAILED\n", g_failures);
 		return 1;
