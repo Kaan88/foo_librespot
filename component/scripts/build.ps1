@@ -23,6 +23,7 @@ $ErrorActionPreference = "Stop"
 $componentDir = Split-Path -Parent $PSScriptRoot
 
 & (Join-Path $PSScriptRoot "fetch_sdk.ps1")
+& (Join-Path $PSScriptRoot "fetch_cui_sdk.ps1")
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found; install Visual Studio C++ tools" }
