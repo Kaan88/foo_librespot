@@ -191,3 +191,103 @@ album_peak    = 10 ^ (default_album_normalization_params.true_peak_db / 20)
 Album values are `null` only when Spotify sends no album params for the file. They are present in `info`, `resolve` and in the `open` header's `track` (which describes the file that actually plays, and can differ from `info` after relinking). Clients should use the `open` header's values for ReplayGain during playback.
 
 The ogg file header carries its own track/album gain and peak, but with a reference level 1 dB higher than the AUDIO_FILES-derived values above, and for singles it can repeat the track values as the album values. AUDIO_FILES is the source used.
+
+## v5 additions (library extras, following, playlist management, playlist search)
+
+Everything below is additive: all earlier requests and fields stay as they are.
+
+### library: recently played, top tracks, top artists
+
+`library` returns three more sections, always present (`items: []` when empty):
+
+```
+{"ok":true,"sections":[
+  ...
+  {"id":"recently_played","title":"Recently played","items":[<item>...]},
+  {"id":"top_tracks","title":"Top tracks","items":[]},
+  {"id":"top_artists","title":"Top artists","items":[]}]}
+```
+
+- `recently_played` lists the contexts the account played from, most recent
+  first and each once, read from Spotify's recently-played service
+  (`GET /recently-played/v3/user/<username>/recently-played?format=json&offset=0&limit=50&filter=default,collection-new-episodes`).
+  It holds albums, artists, playlists and Liked Songs as the matching `<item>`
+  kinds; kinds that cannot be described (shows, episodes) are left out.
+  Playlist items get their name, owner, picture and revision from the playlist
+  service and have `track_count: null` (the recently-played service reports no
+  count). A context whose metadata cannot be read is still listed by URI.
+- `top_tracks` and `top_artists` are present but empty: no top-list source is
+  reachable from this login. The TOPTracks/TOPARTISTS context upstream
+  (`hm://context-user/v1/spotify/user/<user>/top/tracks|artists`) is not
+  deployed (context resolve answers 404 "Could not find an upstream service"),
+  `/user-profile-view/v3/profile/<user>/top/artist|track` answers 404, the
+  profile view carries no top lists (even with `artist_limit`) and the Web
+  API's `/v1/me/top/*` answers 429 for this token. A bridge that finds a source
+  can fill them later without a protocol change; clients must render the empty
+  sections.
+
+### follow / unfollow / following
+
+```
+{"op":"follow","uris":["spotify:artist:ID","spotify:album:ID","spotify:playlist:ID"]} -> {"ok":true}
+{"op":"unfollow","uris":[...]} -> {"ok":true}
+{"op":"following","uris":[...]} -> {"ok":true,"following":[true,false,...]}
+```
+
+- Artists are followed with the collection `artist` set; albums are saved in
+  the collection `collection` set (the set Liked Songs lives in); playlists are
+  added to (at the top) or removed from the user's rootlist. `following`
+  answers in request order: collection contains for artists and albums,
+  rootlist membership for playlists.
+- At most 500 URIs per request; each must be an artist, album or playlist.
+- Following a playlist that is already in the library, or unfollowing one that
+  is not, is a no-op for that URI, not an error.
+- `"dry_run":true` returns the requests instead of sending them:
+  `{"ok":true,"dry_run":true,"requests":[<request>...]}` with `<request>` as in
+  `playlist_add`. `requests` is empty when there is nothing to do.
+- The existing `save`/`unsave`/`saved` ops keep working on tracks unchanged.
+
+### playlist_create / playlist_rename / playlist_delete / playlist_remove
+
+```
+{"op":"playlist_create","name":"My Mix"} -> {"ok":true,"playlist":<item>,"revision":"..."}
+{"op":"playlist_rename","playlist":"spotify:playlist:ID","name":"New name"} -> {"ok":true,"revision":"..."}
+{"op":"playlist_delete","playlist":"spotify:playlist:ID"} -> {"ok":true}
+{"op":"playlist_remove","playlist":"spotify:playlist:ID",
+ "items":[{"uri":"spotify:track:ID","index":3},...]} -> {"ok":true,"revision":"..."}
+```
+
+- `playlist_create` posts a playlist4 `ListUpdateRequest` carrying the name to
+  `/playlist/v2/playlist`, then puts the new playlist at the top of the
+  rootlist. The reply's `playlist` is a playlist `<item>` with `editable:true`,
+  `track_count:0` and no image.
+- `playlist_rename` sends a `ListChanges` with an `UPDATE_LIST_ATTRIBUTES` op,
+  based on the playlist's current revision.
+- `playlist_delete` is unfollow: Spotify has no delete, so the playlist is
+  removed from the rootlist at its index. It answers ok when the playlist is
+  not in the library.
+- `playlist_remove` sends `REM` ops by index, highest index first. An item
+  whose `uri` sits at its `index` in the playlist's current revision is removed
+  there. Otherwise, if the `uri` is in the playlist exactly once, that position
+  is used (a client's copy can leave out entries it cannot play, so its
+  positions may be lower). A `uri` that is missing, or that is there several
+  times and not at `index`, answers `bad_request` and nothing is removed, so the
+  wrong track is never removed. `index` is mandatory.
+- Every one of these takes `"dry_run":true` and returns the request instead:
+  `playlist_create` answers `{"ok":true,"dry_run":true,"requests":[<create request>]}`
+  (the rootlist change needs the id Spotify assigns, so it is not previewed);
+  the others answer
+  `{"ok":true,"revision":"<base revision>","dry_run":true,"request":<request>}`.
+- A 409 (playlist or rootlist changed meanwhile) is retried once with the fresh
+  revision. A 403/404 answers `bad_request`; another refusal from Spotify
+  answers `unsupported` with Spotify's message. Writes are never resent
+  blindly; an unknown outcome is an error, not a success.
+
+### search: playlists
+
+The `search` reply's `playlists` list is filled from Spotify's internal search
+service
+(`GET /searchview/km/v4/search/<query>?entityVersion=2&limit=N&offset=0&country=<CC>&locale=en&username=<user>&platform=WebPlayer&clientVersion=1.0.0`),
+in Spotify's order. Items carry URI, name, owner as `subtitle` and image, with
+`track_count: null`. If that service fails, the search still answers its
+tracks, albums and artists and `playlists` is `[]`; the bridge logs a warning.

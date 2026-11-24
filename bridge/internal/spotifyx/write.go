@@ -71,18 +71,28 @@ func trackURIs(raw []string) ([]string, error) {
 	return out, nil
 }
 
-// buildCollectionContains builds the body of /collection/v2/contains.
-func buildCollectionContains(username string, uris []string) ([]byte, error) {
-	req := &collectionpb.ContainsRequest{Username: username, Set: spclient.CollectionSetLikedSongs}
+// buildCollectionContains builds the body of /collection/v2/contains for a
+// collection set (Liked Songs/tracks, albums or followed artists).
+func buildCollectionContains(username, set string, uris []string) ([]byte, error) {
+	return proto.Marshal(collectionContainsMessage(username, set, uris))
+}
+
+func collectionContainsMessage(username, set string, uris []string) *collectionpb.ContainsRequest {
+	req := &collectionpb.ContainsRequest{Username: username, Set: set}
 	for _, uri := range uris {
 		req.Items = append(req.Items, &collectionpb.CollectionItem{Uri: uri})
 	}
-	return proto.Marshal(req)
+	return req
 }
 
-// buildCollectionWrite builds the body of /collection/v2/write.
-func buildCollectionWrite(username string, uris []string, remove bool, now time.Time) ([]byte, error) {
-	req := &collectionpb.WriteRequest{Username: username, Set: spclient.CollectionSetLikedSongs}
+// buildCollectionWrite builds the body of /collection/v2/write for a collection
+// set.
+func buildCollectionWrite(username, set string, uris []string, remove bool, now time.Time) ([]byte, error) {
+	return proto.Marshal(collectionWriteMessage(username, set, uris, remove, now))
+}
+
+func collectionWriteMessage(username, set string, uris []string, remove bool, now time.Time) *collectionpb.WriteRequest {
+	req := &collectionpb.WriteRequest{Username: username, Set: set}
 	for _, uri := range uris {
 		item := &collectionpb.CollectionItem{Uri: uri, IsRemoved: remove}
 		if !remove {
@@ -90,7 +100,7 @@ func buildCollectionWrite(username string, uris []string, remove bool, now time.
 		}
 		req.Items = append(req.Items, item)
 	}
-	return proto.Marshal(req)
+	return req
 }
 
 // parseContains decodes a /collection/v2/contains answer.
@@ -140,7 +150,7 @@ func (m *Manager) Saved(ctx context.Context, rawURIs []string) ([]bool, error) {
 	}
 	var found []bool
 	err = m.Do(ctx, func(env *Env) error {
-		body, err := buildCollectionContains(env.Session.Username(), uris)
+		body, err := buildCollectionContains(env.Session.Username(), spclient.CollectionSetLikedSongs, uris)
 		if err != nil {
 			return err
 		}
@@ -170,7 +180,7 @@ func (m *Manager) SetSaved(ctx context.Context, rawURIs []string, save bool) err
 		return err
 	}
 	err = m.Do(ctx, func(env *Env) error {
-		body, err := buildCollectionWrite(env.Session.Username(), uris, !save, time.Now())
+		body, err := buildCollectionWrite(env.Session.Username(), spclient.CollectionSetLikedSongs, uris, !save, time.Now())
 		if err != nil {
 			return err
 		}
@@ -204,11 +214,12 @@ func (m *Manager) invalidateLibrary() {
 	m.libAt = time.Time{}
 }
 
-// PlaylistRequest is a playlist change as it is (or would be) sent.
+// PlaylistRequest is a write request as it is (or would be) sent: a playlist
+// or rootlist change, a collection write or a playlist creation.
 type PlaylistRequest struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
-	// BodyText is the ListChanges message in protobuf text form.
+	// BodyText is the protobuf message in text form.
 	BodyText string `json:"body_text"`
 	BodyLen  int    `json:"body_len"`
 	// Body is the exact wire body.
@@ -248,18 +259,22 @@ func buildPlaylistAppend(playlistID, username string, revision []byte, uris []st
 	}, nil
 }
 
-// PlaylistAddResult is the outcome of PlaylistAdd.
-type PlaylistAddResult struct {
-	// Revision is the playlist's revision after the change (hex); for a dry run
-	// it is the revision the change is based on.
+// PlaylistChangeResult is the outcome of a playlist change or creation.
+type PlaylistChangeResult struct {
+	// Revision is the playlist's (or rootlist's) revision after the change
+	// (hex); for a dry run it is the revision the change is based on.
 	Revision string
-	// Request is set for a dry run.
+	// Request is set for a dry run of a change with one request.
 	Request *PlaylistRequest
+	// Requests is set for a dry run that needs more than one request (a
+	// playlist creation has a rootlist entry, a follow touches several
+	// collection sets).
+	Requests []*PlaylistRequest
 }
 
 // PlaylistAdd appends tracks to a playlist. With dryRun it only reads the
 // playlist's current revision and returns the request it would send.
-func (m *Manager) PlaylistAdd(ctx context.Context, playlist string, rawURIs []string, dryRun bool) (*PlaylistAddResult, error) {
+func (m *Manager) PlaylistAdd(ctx context.Context, playlist string, rawURIs []string, dryRun bool) (*PlaylistChangeResult, error) {
 	ref, err := spotifyuri.Parse(playlist)
 	if err != nil || ref.Kind != spotifyuri.KindPlaylist {
 		return nil, badInputf("%q is not a playlist", playlist)
@@ -273,7 +288,7 @@ func (m *Manager) PlaylistAdd(ctx context.Context, playlist string, rawURIs []st
 		return nil, badInputf("%v", err)
 	}
 
-	var result *PlaylistAddResult
+	var result *PlaylistChangeResult
 	err = m.Do(ctx, func(env *Env) error {
 		sp := env.Session.Spclient()
 		username := env.Session.Username()
@@ -290,12 +305,12 @@ func (m *Manager) PlaylistAdd(ctx context.Context, playlist string, rawURIs []st
 				return err
 			}
 			if dryRun {
-				result = &PlaylistAddResult{Revision: hex.EncodeToString(revision), Request: req}
+				result = &PlaylistChangeResult{Revision: hex.EncodeToString(revision), Request: req}
 				return nil
 			}
 
 			// A change is not idempotent: never resend it blindly.
-			resp, err := sp.RequestOnce(ctx, req.Method, req.Path, nil, nil, req.Body)
+			resp, err := sendOnce(ctx, sp, req, nil)
 			if err != nil {
 				return err
 			}
@@ -306,9 +321,10 @@ func (m *Manager) PlaylistAdd(ctx context.Context, playlist string, rawURIs []st
 			case resp.StatusCode == http.StatusOK:
 				newRev, err := sp.PlaylistRevision(ctx, *id)
 				if err != nil {
-					return playlistError("reading the new revision", err)
+					// The tracks are added: never let the manager resend them.
+					return &finalError{playlistError("reading the new revision", err)}
 				}
-				result = &PlaylistAddResult{Revision: hex.EncodeToString(newRev)}
+				result = &PlaylistChangeResult{Revision: hex.EncodeToString(newRev)}
 				return nil
 			case resp.StatusCode == http.StatusConflict && attempt == 0:
 				continue
@@ -337,4 +353,55 @@ func playlistError(what string, err error) error {
 		return badInputf("%s failed: playlist not accessible (HTTP %d)", what, se.StatusCode)
 	}
 	return err
+}
+
+// previewMessage builds a dry-run description of one protobuf write request.
+func previewMessage(method, path string, msg proto.Message, what string) (*PlaylistRequest, error) {
+	body, err := proto.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("encoding %s: %w", what, err)
+	}
+	return &PlaylistRequest{
+		Method:   method,
+		Path:     path,
+		BodyText: prototext.MarshalOptions{Multiline: false}.Format(msg),
+		BodyLen:  len(body),
+		Body:     body,
+	}, nil
+}
+
+// writeFailure maps a refused or failed write to a protocol error: 403/404 is
+// bad input (not permitted, or no such entity), another 4xx is Spotify's
+// refusal, and anything else is an unknown outcome that must not be retried
+// automatically.
+func writeFailure(what string, status int, body []byte) error {
+	switch {
+	case status == http.StatusForbidden || status == http.StatusNotFound:
+		return badInputf("%s is not permitted (HTTP %d): %s", what, status, trimBody(body))
+	case isClientStatus(status):
+		return rejected(what, status, body)
+	default:
+		return &finalError{fmt.Errorf("%s answered %d", what, status)}
+	}
+}
+
+// sendOnce sends a non-idempotent change exactly once. A transport failure may
+// mean Spotify applied it, so it is wrapped as final: the manager must not
+// recreate the session and send the change again.
+func sendOnce(ctx context.Context, sp *spclient.Spclient, req *PlaylistRequest, header http.Header) (*http.Response, error) {
+	resp, err := sp.RequestOnce(ctx, req.Method, req.Path, nil, header, req.Body)
+	if err != nil {
+		return nil, &finalError{err}
+	}
+	return resp, nil
+}
+
+// readRevision reads a playlist's current revision, mapping an inaccessible
+// playlist to bad input.
+func readRevision(ctx context.Context, sp *spclient.Spclient, id librespot.SpotifyId) ([]byte, error) {
+	revision, err := sp.PlaylistRevision(ctx, id)
+	if err != nil {
+		return nil, playlistError("reading the playlist", err)
+	}
+	return revision, nil
 }

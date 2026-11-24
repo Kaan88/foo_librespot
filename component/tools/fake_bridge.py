@@ -33,7 +33,20 @@ import win32pipe
 PIPE_UNLIMITED_INSTANCES = 255
 
 ARGS = None
-STATE = {"revision": "1", "tracks": 3, "saved": set(), "playlist_adds": 0}
+STATE = {
+    "revision": "1",
+    "tracks": 3,
+    "saved": set(),
+    "playlist_adds": 0,
+    # v5: followed artists/albums/playlists, the user's own playlist and the
+    # playlists created through playlist_create.
+    "followed": set(),
+    "user_playlist_name": "Road Trip",
+    "user_playlist_present": True,
+    "user_playlist_contents": [],
+    "created_playlists": [],
+    "playlist_edits": 0,
+}
 STATE_LOCK = threading.Lock()
 
 
@@ -101,6 +114,15 @@ def make_library():
     with STATE_LOCK:
         revision = STATE["revision"]
         count = STATE["tracks"]
+        playlist_items = []
+        if STATE["user_playlist_present"]:
+            playlist_items.append(make_item(
+                "spotify:playlist:user000000000000000001", "playlist",
+                STATE["user_playlist_name"], "fake_user", revision, count, True))
+        for uri, name in STATE["created_playlists"]:
+            playlist_items.append(make_item(uri, "playlist", name, "fake_user", revision, 0, True))
+        playlist_items.append(make_item("spotify:playlist:shared00000000000001", "playlist",
+                                        "Shared Mix", "someone_else", revision, count, False))
     return {
         "ok": True,
         "sections": [
@@ -112,11 +134,7 @@ def make_library():
                           "Daily Mix 1", "Spotify", revision, count),
                 make_item("spotify:playlist:made000000000000000002", "playlist",
                           "Discover Weekly", "Spotify", revision, count)]},
-            {"id": "playlists", "title": "Your playlists", "items": [
-                make_item("spotify:playlist:user000000000000000001", "playlist",
-                          "Road Trip", "fake_user", revision, count, True),
-                make_item("spotify:playlist:shared00000000000001", "playlist",
-                          "Shared Mix", "someone_else", revision, count, False)]},
+            {"id": "playlists", "title": "Your playlists", "items": playlist_items},
             {"id": "albums", "title": "Albums", "items": [
                 make_item("spotify:album:alb0000000000000000001", "album",
                           "Saved Album One", "Fake Artist", revision, count),
@@ -125,6 +143,13 @@ def make_library():
             {"id": "artists", "title": "Artists", "items": [
                 make_item("spotify:artist:art0000000000000000001", "artist",
                           "Fake Artist", "", None, count)]},
+            {"id": "recently_played", "title": "Recently played", "items": [
+                make_item("spotify:album:recent0000000000000001", "album",
+                          "Recent Album", "Fake Artist", None, 0),
+                make_item("spotify:playlist:recent0000000000000001", "playlist",
+                          "Recent Playlist", "fake_user", None, 0)]},
+            {"id": "top_tracks", "title": "Top tracks", "items": []},
+            {"id": "top_artists", "title": "Top artists", "items": []},
         ],
     }
 
@@ -251,7 +276,9 @@ def handle_connection(handle):
             return
 
         if ARGS.logged_out and op in ("info", "resolve", "open", "library", "search", "artist",
-                                       "saved", "save", "unsave", "playlist_add", "radio"):
+                                       "saved", "save", "unsave", "playlist_add", "radio",
+                                       "following", "follow", "unfollow", "playlist_create",
+                                       "playlist_rename", "playlist_delete", "playlist_remove"):
             write_all(handle, (json.dumps(error_reply("not_logged_in", "not logged in")) + "\n").encode("utf-8"))
             return
 
@@ -319,6 +346,118 @@ def handle_connection(handle):
             context = {"uri": "spotify:station:" + uri, "name": "Fake Track 1 Radio", "owner": "Spotify",
                        "image_url": None, "revision": "r1", "track_count": 4}
             write_all(handle, (json.dumps({"ok": True, "tracks": tracks, "context": context}) + "\n").encode("utf-8"))
+            return
+
+        if op in ("following", "follow", "unfollow"):
+            uris = request.get("uris")
+            if not isinstance(uris, list) or not uris:
+                write_all(handle, (json.dumps(error_reply("bad_request", "uris required")) + "\n").encode("utf-8"))
+                return
+            if op != "following":
+                for uri in uris:
+                    if not (uri.startswith("spotify:artist:") or uri.startswith("spotify:album:") or
+                            uri.startswith("spotify:playlist:")):
+                        write_all(handle, (json.dumps(error_reply(
+                            "bad_request", "not an artist, album or playlist")) + "\n").encode("utf-8"))
+                        return
+            with STATE_LOCK:
+                if op == "following":
+                    reply = {"ok": True, "following": [uri in STATE["followed"] for uri in uris]}
+                else:
+                    for uri in uris:
+                        if op == "follow":
+                            STATE["followed"].add(uri)
+                        else:
+                            STATE["followed"].discard(uri)
+                    reply = {"ok": True}
+            write_all(handle, (json.dumps(reply) + "\n").encode("utf-8"))
+            return
+
+        if op == "playlist_create":
+            name = request.get("name", "")
+            if not isinstance(name, str) or not name.strip():
+                write_all(handle, (json.dumps(error_reply("bad_request", "name must not be empty")) + "\n").encode("utf-8"))
+                return
+            with STATE_LOCK:
+                STATE["playlist_edits"] += 1
+                number = STATE["playlist_edits"]
+                uri = "spotify:playlist:pycreated%017d" % number
+                STATE["created_playlists"].append((uri, name))
+                STATE["followed"].add(uri)
+                item = make_item(uri, "playlist", name, "fake_user", "pc%d" % number, 0, True)
+            write_all(handle, (json.dumps({"ok": True, "playlist": item,
+                                           "revision": "pc%d" % number}) + "\n").encode("utf-8"))
+            return
+
+        if op == "playlist_rename":
+            playlist = request.get("playlist", "")
+            name = request.get("name", "")
+            if not isinstance(name, str) or not name.strip():
+                write_all(handle, (json.dumps(error_reply("bad_request", "name must not be empty")) + "\n").encode("utf-8"))
+                return
+            with STATE_LOCK:
+                found = False
+                if playlist == "spotify:playlist:user000000000000000001":
+                    STATE["user_playlist_name"] = name
+                    found = True
+                else:
+                    for index, (uri, _) in enumerate(STATE["created_playlists"]):
+                        if uri == playlist:
+                            STATE["created_playlists"][index] = (uri, name)
+                            found = True
+                            break
+                if not found:
+                    write_all(handle, (json.dumps(error_reply("bad_request", "no such playlist")) + "\n").encode("utf-8"))
+                    return
+                STATE["playlist_edits"] += 1
+                number = STATE["playlist_edits"]
+            write_all(handle, (json.dumps({"ok": True, "revision": "pr%d" % number}) + "\n").encode("utf-8"))
+            return
+
+        if op == "playlist_delete":
+            playlist = request.get("playlist", "")
+            with STATE_LOCK:
+                if playlist == "spotify:playlist:user000000000000000001":
+                    STATE["user_playlist_present"] = False
+                else:
+                    STATE["created_playlists"] = [
+                        entry for entry in STATE["created_playlists"] if entry[0] != playlist]
+                STATE["followed"].discard(playlist)
+                STATE["playlist_edits"] += 1
+            write_all(handle, (json.dumps({"ok": True}) + "\n").encode("utf-8"))
+            return
+
+        if op == "playlist_remove":
+            playlist = request.get("playlist", "")
+            items = request.get("items")
+            if (playlist != "spotify:playlist:user000000000000000001" or
+                    not isinstance(items, list) or not items):
+                write_all(handle, (json.dumps(error_reply(
+                    "bad_request", "items required for an editable playlist")) + "\n").encode("utf-8"))
+                return
+            with STATE_LOCK:
+                indices = []
+                seen = set()
+                for entry in items:
+                    uri = entry.get("uri", "")
+                    index = entry.get("index", -1)
+                    contents = STATE["user_playlist_contents"]
+                    if (not isinstance(index, int) or index < 0 or index >= len(contents) or
+                            contents[index] != uri):
+                        write_all(handle, (json.dumps(error_reply(
+                            "bad_request", "the playlist changed; the item is not at that index")) + "\n").encode("utf-8"))
+                        return
+                    if index in seen:
+                        write_all(handle, (json.dumps(error_reply(
+                            "bad_request", "index given twice")) + "\n").encode("utf-8"))
+                        return
+                    seen.add(index)
+                    indices.append(index)
+                for index in sorted(indices, reverse=True):
+                    del STATE["user_playlist_contents"][index]
+                STATE["playlist_edits"] += 1
+                number = STATE["playlist_edits"]
+            write_all(handle, (json.dumps({"ok": True, "revision": "pm%d" % number}) + "\n").encode("utf-8"))
             return
 
         if op == "test_control":
@@ -405,6 +544,16 @@ def main():
     ARGS = parser.parse_args()
     STATE["revision"] = ARGS.revision
     STATE["tracks"] = ARGS.tracks
+    STATE["followed"].update([
+        "spotify:artist:art0000000000000000001",
+        "spotify:album:alb0000000000000000001",
+        "spotify:playlist:user000000000000000001",
+    ])
+    STATE["user_playlist_contents"] = [
+        "spotify:track:plfirst000000000000001",
+        "spotify:track:plsecond00000000000001",
+        "spotify:track:plthird000000000000001",
+    ]
 
     log(f"listening on \\\\.\\pipe\\{ARGS.pipe} (duration {ARGS.duration_ms} ms, "
         f"{ARGS.rate} Hz, {ARGS.channels} ch{', logged out' if ARGS.logged_out else ''})")

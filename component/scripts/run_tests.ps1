@@ -56,6 +56,72 @@ function Wait-Pipe([string]$PipeName, [int]$TimeoutMs = 10000) {
     throw "pipe $PipeName did not become ready"
 }
 
+# Protocol v5: following, playlist_create/rename/delete/remove, and the new
+# library sections. Runs against either fake bridge.
+function Assert-ManagementOps([string]$PipeName) {
+    $artist = "spotify:artist:art0000000000000000001"
+    $album = "spotify:album:alb0000000000000000001"
+    $playlist = "spotify:playlist:user000000000000000001"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "library")
+    Assert ($r.Output -match "section id=recently_played .*items=2") `
+        "$PipeName recently played section"
+    Assert ($r.Output -match "section id=top_tracks .*items=0") "$PipeName top tracks section is empty"
+    Assert ($r.Output -match "section id=top_artists .*items=0") "$PipeName top artists section is empty"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "following", $artist, $album, $playlist,
+        "spotify:album:nope00000000000000001", "spotify:artist:nope00000000000000000",
+        "spotify:playlist:nope0000000000000001")
+    Assert ($r.Code -eq 0 -and $r.Output -match "following true true true false false false") `
+        "$PipeName following reports membership in request order"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "unfollow", $artist)
+    $r = Invoke-Probe @("--pipe", $PipeName, "following", $artist)
+    Assert ($r.Output -match "following false") "$PipeName unfollow clears membership"
+    $r = Invoke-Probe @("--pipe", $PipeName, "follow", $artist)
+    $r = Invoke-Probe @("--pipe", $PipeName, "following", $artist)
+    Assert ($r.Output -match "following true") "$PipeName follow restores membership"
+    $r = Invoke-Probe @("--pipe", $PipeName, "follow", "spotify:track:0123456789abcdefghijkl")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=bad_request") `
+        "$PipeName follow refuses a track"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_create", "New Mix")
+    $createdUri = $null
+    if ($r.Output -match "playlist_create ok uri=(spotify:playlist:\S+)") { $createdUri = $Matches[1] }
+    Assert ($r.Code -eq 0 -and $createdUri -ne $null -and $r.Output -match "revision=") `
+        "$PipeName playlist_create returns the new item"
+    $r = Invoke-Probe @("--pipe", $PipeName, "library")
+    Assert ($r.Output -match "name=New Mix .*editable=true") `
+        "$PipeName playlist_create adds the playlist to the library"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_rename", $playlist, "Road Trip Renamed")
+    Assert ($r.Code -eq 0 -and $r.Output -match "playlist_rename ok revision=") `
+        "$PipeName playlist_rename succeeds"
+    $r = Invoke-Probe @("--pipe", $PipeName, "library")
+    Assert ($r.Output -match "name=Road Trip Renamed") "$PipeName rename shows in the library"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_remove", $playlist,
+        "spotify:track:plsecond00000000000001:1")
+    Assert ($r.Code -eq 0 -and $r.Output -match "playlist_remove ok count=1 revision=") `
+        "$PipeName playlist_remove succeeds"
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_remove", $playlist,
+        "spotify:track:plsecond00000000000001:1")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=bad_request") `
+        "$PipeName playlist_remove refuses a stale index"
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_remove", $playlist,
+        "spotify:track:plthird000000000000001:0")
+    Assert ($r.Code -eq 1 -and $r.Output -match "code=bad_request") `
+        "$PipeName playlist_remove refuses the wrong uri at an index"
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_remove", $playlist,
+        "spotify:track:plfirst000000000000001:0")
+    Assert ($r.Code -eq 0) "$PipeName playlist_remove removes the verified item"
+
+    $r = Invoke-Probe @("--pipe", $PipeName, "playlist_delete", $createdUri)
+    Assert ($r.Code -eq 0 -and $r.Output -match "playlist_delete ok") "$PipeName playlist_delete succeeds"
+    $r = Invoke-Probe @("--pipe", $PipeName, "library")
+    Assert ($r.Output -notmatch "name=New Mix") "$PipeName deleted playlist leaves the library"
+}
+
 
 # Stops only the bridges this script spawned: the fake copied to librespot-bridge.exe
 # runs with a --pipe name starting with foo_librespot_spawn. Never stop by image name,
@@ -92,7 +158,7 @@ try {
 
     # --- protocol v2: library / search / artist / revision -----------------
     $r = Invoke-Probe @("--pipe", $normalPipe, "library")
-    Assert ($r.Code -eq 0 -and $r.Output -match "library sections=5") "library has 5 sections"
+    Assert ($r.Code -eq 0 -and $r.Output -match "library sections=8") "library has 8 sections"
     Assert ($r.Output -match "section id=liked .*items=1") "liked section"
     Assert ($r.Output -match "section id=made_for_you .*items=2") "made-for-you section"
     Assert ($r.Output -match "kind=collection name=Liked Songs") "Liked Songs collection item"
@@ -200,6 +266,9 @@ try {
     $r = Invoke-Probe @("--pipe", $normalPipe, "config", "--cache-mb", "0")
     Assert ($r.Output -match "config cache_mb=0 ") "cache can be turned off live"
 
+    # --- protocol v5: following, playlist management, new sections ---------
+    Assert-ManagementOps $normalPipe
+
     # --- abort test (real-time stream) ------------------------------------
     $realtimePipe = "foo_librespot_rt"
     $started += Start-Process -FilePath $fake `
@@ -290,7 +359,7 @@ try {
                 "--frames", "all", "--expect-frames", "44100")
             Assert ($r.Code -eq 0 -and $r.Output -match "peak=0.250000") "python fake bridge PCM"
             $r = Invoke-Probe @("--pipe", $pythonPipe, "library")
-            Assert ($r.Code -eq 0 -and $r.Output -match "library sections=5" `
+            Assert ($r.Code -eq 0 -and $r.Output -match "library sections=8" `
                 -and $r.Output -match "kind=collection") "python fake bridge library"
             $r = Invoke-Probe @("--pipe", $pythonPipe, "saved", "spotify:track:0123456789abcdefghijkl")
             Assert ($r.Code -eq 0 -and $r.Output -match "saved false") "python fake bridge saved"
@@ -308,6 +377,7 @@ try {
             $r = Invoke-Probe @("--pipe", $pythonPipe, "resolve", "spotify:playlist:py0000000000000000001")
             Assert ($r.Code -eq 0 -and $r.Output -match "context .*revision=\d+") `
                 "python fake bridge resolve context"
+            Assert-ManagementOps $pythonPipe
         } else {
             Write-Host "SKIP  python fake bridge (pywin32 not installed)"
         }

@@ -10,8 +10,10 @@
 #include <windows.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -53,6 +55,14 @@ struct v2_state_t {
 	// v3: Liked Songs membership and playlist_add bookkeeping.
 	std::set<std::string> saved;
 	int playlist_adds = 0;
+	// v5: followed artists/albums/playlists (the library), the user's own
+	// playlist and the playlists created through playlist_create.
+	std::set<std::string> followed;
+	std::string user_playlist_name = "Road Trip";
+	bool user_playlist_present = true;
+	std::vector<std::string> user_playlist_contents;
+	std::vector<std::pair<std::string, std::string>> created_playlists;
+	int playlist_edits = 0;
 } g_v2;
 
 std::string context_name(const std::string& uri) {
@@ -107,11 +117,21 @@ std::string make_library() {
 		"Spotify", revision, count);
 	out += "]},";
 	out += "{\"id\":\"playlists\",\"title\":\"Your playlists\",\"items\":[";
-	out += make_item("spotify:playlist:user000000000000000001", "playlist", "Road Trip",
-		"fake_user", revision, count, 1);
-	out += ",";
-	out += make_item("spotify:playlist:shared00000000000001", "playlist", "Shared Mix",
-		"someone_else", revision, count, 0);
+	bool first = true;
+	const auto append = [&out, &first](const std::string& item) {
+		if (!first) out += ",";
+		first = false;
+		out += item;
+	};
+	if (g_v2.user_playlist_present) {
+		append(make_item("spotify:playlist:user000000000000000001", "playlist",
+			g_v2.user_playlist_name, "fake_user", revision, count, 1));
+	}
+	for (const auto& created : g_v2.created_playlists) {
+		append(make_item(created.first, "playlist", created.second, "fake_user", revision, 0, 1));
+	}
+	append(make_item("spotify:playlist:shared00000000000001", "playlist", "Shared Mix",
+		"someone_else", revision, count, 0));
 	out += "]},";
 	out += "{\"id\":\"albums\",\"title\":\"Albums\",\"items\":[";
 	out += make_item("spotify:album:alb0000000000000000001", "album", "Saved Album One",
@@ -120,10 +140,19 @@ std::string make_library() {
 	out += make_item("spotify:album:alb0000000000000000002", "album", "Saved Album Two",
 		"Fake Artist", revision, count);
 	out += "]},";
-	out += "{\"id\":\"artists\",\"title\":\"Artists\",\"items\":[";
+	out += "{\"id\":\"artists\",\"title\":\"Artists\",\"items\":["; 
 	out += make_item("spotify:artist:art0000000000000000001", "artist", "Fake Artist", "",
 		"", count);
-	out += "]}";
+	out += "]},";
+	out += "{\"id\":\"recently_played\",\"title\":\"Recently played\",\"items\":[";
+	out += make_item("spotify:album:recent0000000000000001", "album", "Recent Album",
+		"Fake Artist", "", 0);
+	out += ",";
+	out += make_item("spotify:playlist:recent0000000000000001", "playlist", "Recent Playlist",
+		"fake_user", "", 0);
+	out += "]},";
+	out += "{\"id\":\"top_tracks\",\"title\":\"Top tracks\",\"items\":[]},";
+	out += "{\"id\":\"top_artists\",\"title\":\"Top artists\",\"items\":[]}";
 	out += "]}";
 	return out;
 }
@@ -333,7 +362,9 @@ void handle_connection(HANDLE pipe) {
 
 	if (g_options.logged_out && (op == "info" || op == "resolve" || op == "open" ||
 		op == "library" || op == "search" || op == "artist" || op == "saved" || op == "save" ||
-		op == "unsave" || op == "playlist_add" || op == "radio")) {
+		op == "unsave" || op == "playlist_add" || op == "radio" || op == "following" ||
+		op == "follow" || op == "unfollow" || op == "playlist_create" ||
+		op == "playlist_rename" || op == "playlist_delete" || op == "playlist_remove")) {
 		write_line(pipe, error_reply("not_logged_in", "not logged in"));
 		return;
 	}
@@ -478,6 +509,146 @@ void handle_connection(HANDLE pipe) {
 		return;
 	}
 
+	// --- protocol v5: following and playlist management ------------------------
+	if (op == "following" || op == "follow" || op == "unfollow") {
+		const flp::json::value* uris = request.find("uris");
+		if (uris == nullptr || !uris->is_array() || uris->array.empty()) {
+			write_line(pipe, error_reply("bad_request", "uris required"));
+			return;
+		}
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		if (op == "following") {
+			std::string reply = "{\"ok\":true,\"following\":[";
+			for (size_t i = 0; i < uris->array.size(); ++i) {
+				const std::string item = uris->array[i].is_string() ? uris->array[i].string : "";
+				if (i != 0) reply += ',';
+				reply += g_v2.followed.count(item) != 0 ? "true" : "false";
+			}
+			reply += "]}";
+			write_line(pipe, reply);
+			return;
+		}
+		for (const flp::json::value& value : uris->array) {
+			const std::string item = value.is_string() ? value.string : "";
+			if (item.rfind("spotify:artist:", 0) != 0 && item.rfind("spotify:album:", 0) != 0 &&
+				item.rfind("spotify:playlist:", 0) != 0) {
+				write_line(pipe, error_reply("bad_request", "not an artist, album or playlist"));
+				return;
+			}
+			if (op == "follow") g_v2.followed.insert(item);
+			else g_v2.followed.erase(item);
+		}
+		write_line(pipe, "{\"ok\":true}");
+		return;
+	}
+
+	if (op == "playlist_create") {
+		const std::string name = request.get_string("name");
+		if (name.empty()) {
+			write_line(pipe, error_reply("bad_request", "name must not be empty"));
+			return;
+		}
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		++g_v2.playlist_edits;
+		const std::string suffix = std::to_string(g_v2.playlist_edits);
+		char id[64];
+		std::snprintf(id, sizeof(id), "created%017lld",
+			static_cast<long long>(g_v2.playlist_edits));
+		const std::string created = std::string("spotify:playlist:") + id;
+		g_v2.created_playlists.emplace_back(created, name);
+		g_v2.followed.insert(created);
+		std::string reply = "{\"ok\":true,\"playlist\":";
+		reply += make_item(created, "playlist", name, "fake_user", "pc" + suffix, 0, 1);
+		reply += ",\"revision\":\"pc" + suffix + "\"}";
+		write_line(pipe, reply);
+		return;
+	}
+
+	if (op == "playlist_rename") {
+		const std::string playlist = request.get_string("playlist");
+		const std::string name = request.get_string("name");
+		if (name.empty()) {
+			write_line(pipe, error_reply("bad_request", "name must not be empty"));
+			return;
+		}
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		bool found = false;
+		if (playlist == "spotify:playlist:user000000000000000001") {
+			g_v2.user_playlist_name = name;
+			found = true;
+		} else {
+			for (auto& created : g_v2.created_playlists) {
+				if (created.first == playlist) {
+					created.second = name;
+					found = true;
+				}
+			}
+		}
+		if (!found) {
+			write_line(pipe, error_reply("bad_request", "no such playlist"));
+			return;
+		}
+		++g_v2.playlist_edits;
+		write_line(pipe, "{\"ok\":true,\"revision\":\"pr" +
+			std::to_string(g_v2.playlist_edits) + "\"}");
+		return;
+	}
+
+	if (op == "playlist_delete") {
+		const std::string playlist = request.get_string("playlist");
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		if (playlist == "spotify:playlist:user000000000000000001") {
+			g_v2.user_playlist_present = false;
+		} else {
+			for (auto it = g_v2.created_playlists.begin(); it != g_v2.created_playlists.end(); ++it) {
+				if (it->first == playlist) {
+					g_v2.created_playlists.erase(it);
+					break;
+				}
+			}
+		}
+		g_v2.followed.erase(playlist);
+		++g_v2.playlist_edits;
+		write_line(pipe, "{\"ok\":true}");
+		return;
+	}
+
+	if (op == "playlist_remove") {
+		const std::string playlist = request.get_string("playlist");
+		const flp::json::value* items = request.find("items");
+		if (playlist != "spotify:playlist:user000000000000000001" || items == nullptr ||
+			!items->is_array() || items->array.empty()) {
+			write_line(pipe, error_reply("bad_request", "items required for an editable playlist"));
+			return;
+		}
+		std::lock_guard<std::mutex> lock(g_v2.mutex);
+		std::vector<int> indices;
+		std::set<int> seen;
+		for (const flp::json::value& value : items->array) {
+			const std::string track = value.get_string("uri");
+			const int index = static_cast<int>(value.get_int64("index", -1));
+			if (index < 0 || index >= static_cast<int>(g_v2.user_playlist_contents.size()) ||
+				g_v2.user_playlist_contents[static_cast<size_t>(index)] != track) {
+				write_line(pipe, error_reply("bad_request",
+					"the playlist changed; the item is not at that index"));
+				return;
+			}
+			if (!seen.insert(index).second) {
+				write_line(pipe, error_reply("bad_request", "index given twice"));
+				return;
+			}
+			indices.push_back(index);
+		}
+		std::sort(indices.begin(), indices.end(), std::greater<int>());
+		for (const int index : indices) {
+			g_v2.user_playlist_contents.erase(g_v2.user_playlist_contents.begin() + index);
+		}
+		++g_v2.playlist_edits;
+		write_line(pipe, "{\"ok\":true,\"revision\":\"pm" +
+			std::to_string(g_v2.playlist_edits) + "\"}");
+		return;
+	}
+
 	if (op == "test_control") {
 		std::lock_guard<std::mutex> lock(g_v2.mutex);
 		if (request.has("revision")) g_v2.revision = request.get_string("revision");
@@ -576,6 +747,15 @@ int wmain(int argc, wchar_t** argv) {
 			++i; // accepted and ignored
 		}
 	}
+
+	g_v2.followed.insert("spotify:artist:art0000000000000000001");
+	g_v2.followed.insert("spotify:album:alb0000000000000000001");
+	g_v2.followed.insert("spotify:playlist:user000000000000000001");
+	g_v2.user_playlist_contents = {
+		"spotify:track:plfirst000000000000001",
+		"spotify:track:plsecond00000000000001",
+		"spotify:track:plthird000000000000001",
+	};
 
 	serve();
 }

@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,13 @@ const usage = `Usage:
   bridgectl [--pipe <name>] save <track-uri>...
   bridgectl [--pipe <name>] unsave <track-uri>...
   bridgectl [--pipe <name>] playlist-add <playlist-uri> <track-uri>... [--dry-run]
+  bridgectl [--pipe <name>] follow <artist|album|playlist uri>... [--dry-run]
+  bridgectl [--pipe <name>] unfollow <artist|album|playlist uri>... [--dry-run]
+  bridgectl [--pipe <name>] following <artist|album|playlist uri>...
+  bridgectl [--pipe <name>] playlist-create <name> [--dry-run]
+  bridgectl [--pipe <name>] playlist-rename <playlist-uri> <name> [--dry-run]
+  bridgectl [--pipe <name>] playlist-delete <playlist-uri> [--dry-run]
+  bridgectl [--pipe <name>] playlist-remove <playlist-uri> <index>:<track-uri>... [--dry-run]
   bridgectl [--pipe <name>] config [--cache-mb N] [--clear-cache]
   bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
   bridgectl [--pipe <name>] open-to-wav <uri-or-url> <out.wav> [--start-ms N] [--seconds S] [--bitrate 96|160|320]
@@ -41,11 +49,18 @@ Commands:
   resolve        Expand a track, album, playlist or Liked Songs reference.
   info           Fetch metadata for one or more tracks.
   library        List the Spotify tab's sections.
-  search         Search Spotify (tracks, albums, artists).
+  search         Search Spotify (tracks, albums, artists, playlists).
   artist         Fetch an artist page: top tracks, albums, singles.
   saved          Tell which tracks are in Liked Songs.
   save, unsave   Add tracks to / remove them from Liked Songs.
   playlist-add   Append tracks to a playlist (--dry-run: show the request, send nothing).
+  follow         Follow artists/albums (library) and playlists (library list).
+  unfollow       The reverse of follow.
+  following      Tell which of the URIs the account follows.
+  playlist-create   Create an empty playlist at the top of the library.
+  playlist-rename   Rename a playlist.
+  playlist-delete   Remove a playlist from the library (unfollow).
+  playlist-remove   Remove tracks from a playlist by position (index:uri).
   radio          Tracks of a radio seeded by a track, artist, album or playlist.
   open-to-wav    Open a track, print the header and write the PCM to a WAV.
 `
@@ -115,6 +130,22 @@ func run(args []string) int {
 		return doJSON(*pipe, map[string]any{"op": rest[0], "uris": rest[1:]})
 	case "playlist-add":
 		return doPlaylistAdd(*pipe, rest[1:])
+	case "follow", "unfollow":
+		return doFollow(*pipe, rest[0], rest[1:])
+	case "following":
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "bridgectl: following needs at least one uri")
+			return 2
+		}
+		return doJSON(*pipe, map[string]any{"op": "following", "uris": rest[1:]})
+	case "playlist-create":
+		return doPlaylistCreate(*pipe, rest[1:])
+	case "playlist-rename":
+		return doPlaylistRename(*pipe, rest[1:])
+	case "playlist-delete":
+		return doPlaylistDelete(*pipe, rest[1:])
+	case "playlist-remove":
+		return doPlaylistRemove(*pipe, rest[1:])
 	case "radio":
 		if len(rest) != 2 {
 			fmt.Fprintln(os.Stderr, "bridgectl: radio needs one uri")
@@ -183,6 +214,88 @@ func doPlaylistAdd(pipe string, args []string) int {
 		"op":       "playlist_add",
 		"playlist": positional[0],
 		"uris":     positional[1:],
+		"dry_run":  dryRun,
+	})
+}
+
+// splitDryRun separates --dry-run from a command's positionals.
+func splitDryRun(args []string) (positional []string, dryRun bool) {
+	for _, arg := range args {
+		switch arg {
+		case "--dry-run", "-dry-run":
+			dryRun = true
+		default:
+			positional = append(positional, arg)
+		}
+	}
+	return positional, dryRun
+}
+
+func doFollow(pipe, op string, args []string) int {
+	positional, dryRun := splitDryRun(args)
+	if len(positional) == 0 {
+		fmt.Fprintf(os.Stderr, "bridgectl: %s needs at least one uri [--dry-run]\n", op)
+		return 2
+	}
+	return doJSON(pipe, map[string]any{"op": op, "uris": positional, "dry_run": dryRun})
+}
+
+func doPlaylistCreate(pipe string, args []string) int {
+	positional, dryRun := splitDryRun(args)
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, "bridgectl: playlist-create needs <name> [--dry-run]")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{"op": "playlist_create", "name": positional[0], "dry_run": dryRun})
+}
+
+func doPlaylistRename(pipe string, args []string) int {
+	positional, dryRun := splitDryRun(args)
+	if len(positional) != 2 {
+		fmt.Fprintln(os.Stderr, "bridgectl: playlist-rename needs <playlist-uri> <name> [--dry-run]")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{
+		"op":       "playlist_rename",
+		"playlist": positional[0],
+		"name":     positional[1],
+		"dry_run":  dryRun,
+	})
+}
+
+func doPlaylistDelete(pipe string, args []string) int {
+	positional, dryRun := splitDryRun(args)
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, "bridgectl: playlist-delete needs <playlist-uri> [--dry-run]")
+		return 2
+	}
+	return doJSON(pipe, map[string]any{"op": "playlist_delete", "playlist": positional[0], "dry_run": dryRun})
+}
+
+func doPlaylistRemove(pipe string, args []string) int {
+	positional, dryRun := splitDryRun(args)
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, "bridgectl: playlist-remove needs <playlist-uri> <index>:<track-uri>... [--dry-run]")
+		return 2
+	}
+	items := make([]map[string]any, 0, len(positional)-1)
+	for _, arg := range positional[1:] {
+		index, uri, ok := strings.Cut(arg, ":")
+		if !ok {
+			fmt.Fprintf(os.Stderr, "bridgectl: %q is not <index>:<track-uri>\n", arg)
+			return 2
+		}
+		n, err := strconv.Atoi(index)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bridgectl: %q is not <index>:<track-uri>\n", arg)
+			return 2
+		}
+		items = append(items, map[string]any{"uri": uri, "index": n})
+	}
+	return doJSON(pipe, map[string]any{
+		"op":       "playlist_remove",
+		"playlist": positional[0],
+		"items":    items,
 		"dry_run":  dryRun,
 	})
 }

@@ -123,6 +123,18 @@ std::string uris_json(const std::vector<std::string>& uris) {
 	return out;
 }
 
+std::string playlist_items_json(const std::vector<playlist_item_ref>& items) {
+	std::string out = "[";
+	for (size_t i = 0; i < items.size(); ++i) {
+		if (i != 0) out += ",";
+		out += "{\"uri\":" + json::quote(items[i].uri);
+		out += ",\"index\":" + std::to_string(items[i].index);
+		out += "}";
+	}
+	out += "]";
+	return out;
+}
+
 } // namespace
 
 bridge_client::bridge_client(std::wstring pipe_name) : m_pipe_name(std::move(pipe_name)) {}
@@ -274,6 +286,70 @@ std::string bridge_client::playlist_add(const std::string& playlist,
 	const json::value reply = request("{\"op\":\"playlist_add\",\"playlist\":" +
 		json::quote(playlist) + ",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
 		reply_timeout_ms);
+	return reply.get_string("revision");
+}
+
+std::vector<bool> bridge_client::following(const std::vector<std::string>& uris,
+	const cancel_token& ct, unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	if (uris.empty()) return {};
+	const json::value reply = request("{\"op\":\"following\",\"uris\":" + uris_json(uris) + "}",
+		ct, connect_timeout_ms, reply_timeout_ms);
+	std::vector<bool> out(uris.size(), false);
+	if (const json::value* flags = reply.find("following"); flags != nullptr && flags->is_array()) {
+		for (size_t i = 0; i < flags->array.size() && i < out.size(); ++i) {
+			out[i] = flags->array[i].is_bool() && flags->array[i].boolean;
+		}
+	}
+	return out;
+}
+
+void bridge_client::follow(const std::vector<std::string>& uris, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	if (uris.empty()) return;
+	request("{\"op\":\"follow\",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+}
+
+void bridge_client::unfollow(const std::vector<std::string>& uris, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	if (uris.empty()) return;
+	request("{\"op\":\"unfollow\",\"uris\":" + uris_json(uris) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+}
+
+playlist_create_result bridge_client::playlist_create(const std::string& name,
+	const cancel_token& ct, unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request(
+		"{\"op\":\"playlist_create\",\"name\":" + json::quote(name) + "}", ct,
+		connect_timeout_ms, reply_timeout_ms);
+	playlist_create_result out;
+	if (const json::value* playlist = reply.find("playlist"); playlist != nullptr) {
+		out.playlist = parse_item(*playlist);
+	}
+	out.revision = reply.get_string("revision");
+	return out;
+}
+
+std::string bridge_client::playlist_rename(const std::string& playlist, const std::string& name,
+	const cancel_token& ct, unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request("{\"op\":\"playlist_rename\",\"playlist\":" +
+		json::quote(playlist) + ",\"name\":" + json::quote(name) + "}", ct, connect_timeout_ms,
+		reply_timeout_ms);
+	return reply.get_string("revision");
+}
+
+void bridge_client::playlist_delete(const std::string& playlist, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	request("{\"op\":\"playlist_delete\",\"playlist\":" + json::quote(playlist) + "}", ct,
+		connect_timeout_ms, reply_timeout_ms);
+}
+
+std::string bridge_client::playlist_remove(const std::string& playlist,
+	const std::vector<playlist_item_ref>& items, const cancel_token& ct,
+	unsigned connect_timeout_ms, unsigned reply_timeout_ms) {
+	const json::value reply = request("{\"op\":\"playlist_remove\",\"playlist\":" +
+		json::quote(playlist) + ",\"items\":" + playlist_items_json(items) + "}", ct,
+		connect_timeout_ms, reply_timeout_ms);
 	return reply.get_string("revision");
 }
 

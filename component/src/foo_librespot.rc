@@ -46,6 +46,17 @@ BEGIN
     PUSHBUTTON      "Cancel",IDCANCEL,300,186,50,14
 END
 
+IDD_PLAYLIST_NAME DIALOGEX 0, 0, 300, 78
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Playlist name"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "Name:",IDC_STATIC,10,10,40,8
+    EDITTEXT        IDC_PLAYLIST_NAME,10,22,280,14,ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "OK",IDOK,184,54,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,240,54,50,14
+END
+
 /////////////////////////////////////////////////////////////////////////////
 //
 // Version

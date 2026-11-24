@@ -3,17 +3,23 @@
 #include "spotify_tab.h"
 
 #include "component_helpers.h"
+#include "resource.h"
 #include "spotify_playlists.h"
 
 #include "bridge/process.h"
 
 #include <SDK/console.h>
 #include <SDK/coreDarkMode.h>
+#include <SDK/metadb.h>
+#include <SDK/playlist.h>
+#include <SDK/popup_message.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,8 +50,15 @@ struct tree_node {
 	node_kind kind = node_kind::message;
 	std::string text;
 	std::string uri;
-	std::string item_kind; // playlist, album, artist, collection, track
+	std::string item_kind; // playlist, album, artist, collection, track, top_tracks
 	std::string name;
+	// Section id of a section node ("playlists", "recently_played", ...).
+	std::string section_id;
+	// The item came from a library section, so it is most likely followed;
+	// only used to label the Follow/Unfollow entry when the bridge has not
+	// answered yet.
+	bool likely_followed = false;
+	bool editable = false;
 	bool expandable = false;
 	bool loaded = false;
 	bool loading = false;
@@ -92,6 +105,63 @@ std::string artists_text(const track_info& track) {
 }
 
 bool is_openable_item(const tree_node& node) { return !node.uri.empty() && !node.item_kind.empty(); }
+
+// Small name prompt for "New playlist..." and "Rename...", with the same dark
+// mode hookup as the Add Spotify link dialog.
+class playlist_name_dialog {
+public:
+	std::string text;
+
+	INT_PTR run(HWND parent, const wchar_t* caption, const std::string& initial) {
+		m_caption = caption;
+		m_initial = initial;
+		return DialogBoxParamW(core_api::get_my_instance(), MAKEINTRESOURCEW(IDD_PLAYLIST_NAME),
+			parent, &playlist_name_dialog::dialog_proc, reinterpret_cast<LPARAM>(this));
+	}
+
+private:
+	static INT_PTR CALLBACK dialog_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
+		if (message == WM_INITDIALOG) {
+			auto* self = reinterpret_cast<playlist_name_dialog*>(lparam);
+			SetWindowLongPtrW(wnd, GWLP_USERDATA, lparam);
+			self->m_dark.AddDialogWithControls(wnd);
+			SetWindowTextW(wnd, self->m_caption.c_str());
+			SetDlgItemTextW(wnd, IDC_PLAYLIST_NAME, wide_from_utf8(self->m_initial).c_str());
+			SendDlgItemMessageW(wnd, IDC_PLAYLIST_NAME, EM_SETSEL, 0,
+				static_cast<LPARAM>(-1));
+			SetFocus(GetDlgItem(wnd, IDC_PLAYLIST_NAME));
+			return FALSE;
+		}
+
+		auto* self = reinterpret_cast<playlist_name_dialog*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
+		if (self == nullptr) return FALSE;
+
+		if (message == WM_COMMAND) {
+			switch (LOWORD(wparam)) {
+			case IDOK: {
+				HWND edit = GetDlgItem(wnd, IDC_PLAYLIST_NAME);
+				const int length = GetWindowTextLengthW(edit);
+				std::wstring wide(static_cast<size_t>(length) + 1, L'\0');
+				if (length > 0) GetWindowTextW(edit, wide.data(), length + 1);
+				wide.resize(static_cast<size_t>(length));
+				self->text = utf8_from_wide(wide);
+				EndDialog(wnd, IDOK);
+				return TRUE;
+			}
+			case IDCANCEL:
+				EndDialog(wnd, IDCANCEL);
+				return TRUE;
+			default:
+				break;
+			}
+		}
+		return FALSE;
+	}
+
+	std::wstring m_caption;
+	std::string m_initial;
+	fb2k::CCoreDarkModeHooks m_dark;
+};
 
 } // namespace
 
@@ -510,7 +580,7 @@ private:
 		tree_node* yourLibrary = add_node(TVI_ROOT, node_kind::section, "Your library",
 			std::string(), std::string(), std::string(), true);
 		if (liked != nullptr) {
-			for (const library_item& item : liked->items) add_item_node(yourLibrary->item, item);
+			for (const library_item& item : liked->items) add_item_node(yourLibrary->item, item, true);
 		}
 		if (liked == nullptr || liked->items.empty()) {
 			add_node(yourLibrary->item, node_kind::message, "Liked Songs unavailable",
@@ -520,7 +590,7 @@ private:
 		tree_node* albumsNode = add_node(yourLibrary->item, node_kind::section, "Albums",
 			std::string(), std::string(), std::string(), true);
 		if (albums != nullptr) {
-			for (const library_item& item : albums->items) add_item_node(albumsNode->item, item);
+			for (const library_item& item : albums->items) add_item_node(albumsNode->item, item, true);
 		}
 		if (albums == nullptr || albums->items.empty()) {
 			add_node(albumsNode->item, node_kind::message, "No saved albums",
@@ -530,18 +600,22 @@ private:
 		tree_node* artistsNode = add_node(yourLibrary->item, node_kind::section, "Artists",
 			std::string(), std::string(), std::string(), true);
 		if (artists != nullptr) {
-			for (const library_item& item : artists->items) add_item_node(artistsNode->item, item);
+			for (const library_item& item : artists->items) add_item_node(artistsNode->item, item, true);
 		}
 		if (artists == nullptr || artists->items.empty()) {
 			add_node(artistsNode->item, node_kind::message, "No followed artists",
 				std::string(), std::string(), std::string(), false);
 		}
 
+		// v5: Recently played sits just below Your library. A section the bridge
+		// reports as empty is left out entirely.
+		add_section_node("recently_played", "Recently played");
+
 		tree_node* madeNode = add_node(TVI_ROOT, node_kind::section,
 			madeForYou != nullptr && !madeForYou->title.empty() ? madeForYou->title : "Made for you",
 			std::string(), std::string(), std::string(), true);
 		if (madeForYou != nullptr) {
-			for (const library_item& item : madeForYou->items) add_item_node(madeNode->item, item);
+			for (const library_item& item : madeForYou->items) add_item_node(madeNode->item, item, true);
 		}
 		if (madeForYou == nullptr || madeForYou->items.empty()) {
 			add_node(madeNode->item, node_kind::message, "No made-for-you playlists",
@@ -551,9 +625,10 @@ private:
 		tree_node* playlistsNode = add_node(TVI_ROOT, node_kind::section,
 			playlists != nullptr && !playlists->title.empty() ? playlists->title : "Your playlists",
 			std::string(), std::string(), std::string(), true);
+		playlistsNode->section_id = "playlists";
 		if (playlists != nullptr) {
 			for (const library_item& item : playlists->items) {
-				add_item_node(playlistsNode->item, item);
+				add_item_node(playlistsNode->item, item, true);
 			}
 		}
 		if (playlists == nullptr || playlists->items.empty()) {
@@ -561,14 +636,33 @@ private:
 				std::string(), std::string(), std::string(), false);
 		}
 
+		// v5: present but empty until a bridge has a top-list source.
+		add_section_node("top_tracks", "Top tracks");
+		add_section_node("top_artists", "Top artists");
+
 		TreeView_Expand(m_tree, yourLibrary->item, TVE_EXPAND);
 	}
 
-	void add_item_node(HTREEITEM parent, const library_item& item) {
+	// Adds a top-level library section, unless the bridge reported it empty.
+	tree_node* add_section_node(const char* id, const char* fallback_title) {
+		const library_section* section = find_section(id);
+		if (section == nullptr || section->items.empty()) return nullptr;
+		tree_node* node = add_node(TVI_ROOT, node_kind::section,
+			section->title.empty() ? fallback_title : section->title, std::string(),
+			std::string(), std::string(), true);
+		node->section_id = id;
+		for (const library_item& item : section->items) add_item_node(node->item, item, false);
+		return node;
+	}
+
+	void add_item_node(HTREEITEM parent, const library_item& item, bool likely_followed = false) {
 		std::string text = item.name;
 		if (!item.subtitle.empty()) text += " \xE2\x80\x94 " + item.subtitle;
 		const bool expandable = item.kind == "artist";
-		add_node(parent, node_kind::item, text, item.uri, item.kind, item.name, expandable);
+		tree_node* node = add_node(parent, node_kind::item, text, item.uri, item.kind, item.name,
+			expandable);
+		node->likely_followed = likely_followed;
+		node->editable = item.editable;
 	}
 
 	const library_section* find_section(const char* id) const {
@@ -833,6 +927,249 @@ private:
 			cancel);
 	}
 
+	// Resolves `uri` on a worker thread and appends every track to
+	// foobar2000's playback queue with preloaded metadata.
+	void queue_target(const std::string& uri, const std::string& name) {
+		if (uri.empty()) return;
+		set_status("Adding " + name + " to the playback queue\xE2\x80\xA6");
+		const std::shared_ptr<async_state> state = m_state;
+		cancel_token cancel;
+		cancel.is_aborting = [state] { return !state->alive.load(); };
+		fb2k::splitTask([state, uri, cancel] {
+			resolve_result resolved;
+			std::string error;
+			try {
+				ensure_bridge_started(fb2k::mainAborter());
+				bridge_client client;
+				resolved = client.resolve_context(uri, cancel);
+				if (resolved.tracks.empty()) error = "Spotify: no tracks found";
+			} catch (const cancelled&) {
+				return;
+			} catch (const std::exception& failure) {
+				error = user_error_message(failure);
+			}
+
+			fb2k::inMainThread([state, resolved, error] {
+				if (!state->alive.load() || state->owner == nullptr) return;
+				if (!error.empty()) {
+					state->owner->report_error(error);
+					return;
+				}
+				const size_t queued = state->owner->add_to_queue(resolved.tracks);
+				if (queued == 0) {
+					state->owner->report_error("Spotify: no tracks found");
+					return;
+				}
+				state->owner->set_status("Added " + std::to_string(queued) +
+					(queued == 1 ? " track" : " tracks") + " to the playback queue.");
+			});
+		});
+	}
+
+	// Appends handles for `tracks` to foobar2000's playback queue. Main thread.
+	size_t add_to_queue(const std::vector<track_info>& tracks) {
+		metadb_handle_list handles;
+		metadb_hint_list_v3::ptr hints = metadb_hint_list_v3::create();
+		for (const track_info& track : tracks) {
+			const std::string path = track_path(track);
+			if (path.empty()) continue;
+			metadb_handle_ptr handle = metadb::get()->handle_create(path.c_str(), 0);
+			if (handle.is_empty()) continue;
+			handles.add_item(handle);
+			file_info_impl info;
+			fill_file_info(track, info);
+			hints->add_hint_forced(handle, info, t_filestats(), false);
+		}
+		if (handles.get_count() == 0) return 0;
+		hints->on_done();
+		playlist_manager::ptr manager = playlist_manager::get();
+		for (t_size i = 0; i < handles.get_count(); ++i) manager->queue_add_item(handles[i]);
+		return handles.get_count();
+	}
+
+	void report_error(const std::string& message) {
+		set_status(message);
+		console::print("foo_librespot: ", message.c_str());
+	}
+
+	// Reads the follow state of one item in the background, so the next menu
+	// open labels Follow/Unfollow correctly. Never blocks the UI.
+	void refresh_follow_async(const std::string& uri) {
+		if (uri.empty() || m_follow_inflight.count(uri) != 0) return;
+		m_follow_inflight.insert(uri);
+		const std::shared_ptr<async_state> state = m_state;
+		fb2k::splitTask([state, uri] {
+			bool following = false;
+			bool ok = false;
+			try {
+				ensure_bridge_started(fb2k::mainAborter());
+				bridge_client client;
+				const std::vector<bool> flags = client.following({ uri }, cancel_token(), 2000, 8000);
+				if (!flags.empty()) {
+					following = flags.front();
+					ok = true;
+				}
+			} catch (...) {
+				// The menu keeps using its likely label.
+			}
+			fb2k::inMainThread([state, uri, following, ok] {
+				if (!state->alive.load() || state->owner == nullptr) return;
+				state->owner->m_follow_inflight.erase(uri);
+				if (ok) {
+					state->owner->m_follow_cache[uri] = follow_state{ following, GetTickCount64() };
+				}
+			});
+		});
+	}
+
+	void set_follow_target(const std::string& uri, const std::string& name, const std::string& kind,
+		bool follow) {
+		const bool album = kind == "album";
+		const std::string done = follow
+			? (album ? "Saved \"" + name + "\" to Your Library." : "Following " + name + ".")
+			: (album ? "Removed \"" + name + "\" from Your Library." : "Unfollowed " + name + ".");
+		set_status("Updating your Spotify library\xE2\x80\xA6");
+
+		const std::shared_ptr<async_state> state = m_state;
+		cancel_token cancel;
+		cancel.is_aborting = [state] { return !state->alive.load(); };
+		fb2k::splitTask([state, uri, cancel, follow, done] {
+			std::string error;
+			try {
+				ensure_bridge_started(fb2k::mainAborter());
+				bridge_client client;
+				if (follow) client.follow({ uri }, cancel);
+				else client.unfollow({ uri }, cancel);
+			} catch (const cancelled&) {
+				return;
+			} catch (const std::exception& failure) {
+				error = user_error_message(failure);
+			}
+
+			fb2k::inMainThread([state, uri, follow, error, done] {
+				if (!state->alive.load() || state->owner == nullptr) return;
+				if (!error.empty()) {
+					state->owner->report_error(error);
+					return;
+				}
+				state->owner->m_follow_cache[uri] = follow_state{ follow, GetTickCount64() };
+				state->owner->request_library();
+				state->owner->set_status(done);
+			});
+		});
+	}
+
+	void new_playlist() {
+		playlist_name_dialog dialog;
+		if (dialog.run(m_wnd, L"New playlist", std::string()) != IDOK) return;
+		const std::string name = trim(dialog.text);
+		if (name.empty()) return;
+		set_status("Creating the playlist\xE2\x80\xA6");
+
+		const std::shared_ptr<async_state> state = m_state;
+		cancel_token cancel;
+		cancel.is_aborting = [state] { return !state->alive.load(); };
+		fb2k::splitTask([state, name, cancel] {
+			std::string error;
+			std::string created = name;
+			try {
+				ensure_bridge_started(fb2k::mainAborter());
+				bridge_client client;
+				const playlist_create_result result = client.playlist_create(name, cancel);
+				if (!result.playlist.name.empty()) created = result.playlist.name;
+			} catch (const cancelled&) {
+				return;
+			} catch (const std::exception& failure) {
+				error = user_error_message(failure);
+			}
+
+			fb2k::inMainThread([state, created, error] {
+				if (!state->alive.load() || state->owner == nullptr) return;
+				if (!error.empty()) {
+					state->owner->report_error(error);
+					return;
+				}
+				state->owner->request_library();
+				state->owner->set_status("Created playlist \"" + created + "\".");
+			});
+		});
+	}
+
+	void rename_playlist(const std::string& uri, const std::string& current) {
+		playlist_name_dialog dialog;
+		if (dialog.run(m_wnd, L"Rename playlist", current) != IDOK) return;
+		const std::string name = trim(dialog.text);
+		if (name.empty() || name == current) return;
+		set_status("Renaming the playlist\xE2\x80\xA6");
+
+		const std::shared_ptr<async_state> state = m_state;
+		cancel_token cancel;
+		cancel.is_aborting = [state] { return !state->alive.load(); };
+		fb2k::splitTask([state, uri, name, cancel] {
+			std::string error;
+			try {
+				ensure_bridge_started(fb2k::mainAborter());
+				bridge_client client;
+				client.playlist_rename(uri, name, cancel);
+			} catch (const cancelled&) {
+				return;
+			} catch (const std::exception& failure) {
+				error = user_error_message(failure);
+			}
+
+			fb2k::inMainThread([state, name, error] {
+				if (!state->alive.load() || state->owner == nullptr) return;
+				if (!error.empty()) {
+					state->owner->report_error(error);
+					return;
+				}
+				state->owner->request_library();
+				state->owner->set_status("Renamed the playlist to \"" + name + "\".");
+			});
+		});
+	}
+
+	void delete_playlist(const std::string& uri, const std::string& name) {
+		const std::string message = "Remove \"" + name + "\" from your Spotify library?\n\n"
+			"The playlist itself stays on Spotify; this only removes it from your library and "
+			"from this panel.";
+		popup_message_v3::query_t query;
+		query.title = "Delete playlist";
+		query.msg = message.c_str();
+		query.buttons = popup_message_v3::buttonYes | popup_message_v3::buttonNo;
+		query.defButton = popup_message_v3::buttonNo;
+		query.icon = popup_message_v3::iconQuestion;
+		query.wndParent = m_wnd;
+		if (popup_message_v3::get()->show_query_modal(query) != popup_message_v3::buttonYes) return;
+
+		set_status("Removing the playlist\xE2\x80\xA6");
+		const std::shared_ptr<async_state> state = m_state;
+		cancel_token cancel;
+		cancel.is_aborting = [state] { return !state->alive.load(); };
+		fb2k::splitTask([state, uri, cancel] {
+			std::string error;
+			try {
+				ensure_bridge_started(fb2k::mainAborter());
+				bridge_client client;
+				client.playlist_delete(uri, cancel);
+			} catch (const cancelled&) {
+				return;
+			} catch (const std::exception& failure) {
+				error = user_error_message(failure);
+			}
+
+			fb2k::inMainThread([state, error] {
+				if (!state->alive.load() || state->owner == nullptr) return;
+				if (!error.empty()) {
+					state->owner->report_error(error);
+					return;
+				}
+				state->owner->request_library();
+				state->owner->set_status("Removed the playlist from your Spotify library.");
+			});
+		});
+	}
+
 	void collect_descendant_items(HTREEITEM parent, std::vector<HTREEITEM>& out) const {
 		for (HTREEITEM child = TreeView_GetChild(m_tree, parent); child != nullptr;
 			child = TreeView_GetNextSibling(m_tree, child)) {
@@ -1033,24 +1370,90 @@ private:
 		return 0;
 	}
 
+	enum menu_command : unsigned {
+		kMenuOpen = 1,
+		kMenuPlay,
+		kMenuAddToPlaylist,
+		kMenuQueue,
+		kMenuSync,
+		kMenuFollow,
+		kMenuRename,
+		kMenuDelete,
+		kMenuNewPlaylist,
+		kMenuCopy,
+	};
+
+	static bool kind_queues_tracks(const std::string& kind) {
+		return kind == "track" || kind == "album" || kind == "playlist" || kind == "collection" ||
+			kind == "top_tracks";
+	}
+
+	static const wchar_t* follow_label(const std::string& kind, bool followed) {
+		if (kind == "album") {
+			return followed ? L"Remove from Your Library" : L"Save to Your Library";
+		}
+		return followed ? L"Unfollow" : L"Follow";
+	}
+
 	LRESULT on_tree_right_click() {
 		KillTimer(m_wnd, kTimerSingleClick);
 		m_pending_click = 0;
 		tree_node* node = node_at_cursor();
-		if (node == nullptr || !is_openable_item(*node)) return 0;
+		if (node == nullptr) return 0;
+		const bool openable = is_openable_item(*node);
+		const bool playlistSection =
+			node->kind == node_kind::section && node->section_id == "playlists";
+		if (!openable && !playlistSection) return 0;
 		TreeView_SelectItem(m_tree, node->item);
+
 		const std::string uri = node->uri;
 		const std::string name = node->name;
+		const std::string kind = node->item_kind;
+		const bool editablePlaylist = kind == "playlist" && node->editable;
+		// On Spotify, deleting your own playlist is unfollowing it, so an
+		// editable playlist offers Delete... instead of Unfollow.
+		const bool followable = openable && !editablePlaylist &&
+			(kind == "artist" || kind == "album" || kind == "playlist");
+		bool followed = node->likely_followed;
+		if (followable) {
+			const auto cached = m_follow_cache.find(uri);
+			if (cached != m_follow_cache.end() &&
+				GetTickCount64() - cached->second.at < kFollowTtlMs) {
+				followed = cached->second.following;
+			} else {
+				refresh_follow_async(uri); // right next time
+			}
+		}
 
 		HMENU menu = CreatePopupMenu();
 		if (menu == nullptr) return 0;
-		AppendMenuW(menu, MF_STRING, 1, L"Open");
-		AppendMenuW(menu, MF_STRING, 2, L"Open and play");
-		AppendMenuW(menu, MF_STRING, 3, L"Add to current playlist");
-		AppendMenuW(menu, MF_STRING, 4, L"Sync now");
-		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING, 5, L"Copy link");
-		SetMenuDefaultItem(menu, 1, FALSE);
+		if (openable) {
+			AppendMenuW(menu, MF_STRING, kMenuOpen, L"Open");
+			AppendMenuW(menu, MF_STRING, kMenuPlay, L"Open and play");
+			AppendMenuW(menu, MF_STRING, kMenuAddToPlaylist, L"Add to current playlist");
+			if (kind_queues_tracks(kind)) {
+				AppendMenuW(menu, MF_STRING, kMenuQueue, L"Add to playback queue");
+			}
+			AppendMenuW(menu, MF_STRING, kMenuSync, L"Sync now");
+		}
+		if (followable || editablePlaylist || playlistSection) {
+			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+			if (followable) {
+				AppendMenuW(menu, MF_STRING, kMenuFollow, follow_label(kind, followed));
+			}
+			if (editablePlaylist) {
+				AppendMenuW(menu, MF_STRING, kMenuRename, L"Rename...");
+				AppendMenuW(menu, MF_STRING, kMenuDelete, L"Delete...");
+			}
+			if (playlistSection) {
+				AppendMenuW(menu, MF_STRING, kMenuNewPlaylist, L"New playlist...");
+			}
+		}
+		if (openable) {
+			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+			AppendMenuW(menu, MF_STRING, kMenuCopy, L"Copy link");
+			SetMenuDefaultItem(menu, kMenuOpen, FALSE);
+		}
 
 		POINT point = {};
 		GetCursorPos(&point);
@@ -1059,11 +1462,16 @@ private:
 		DestroyMenu(menu);
 
 		switch (command) {
-		case 1: open_target(uri, name, false, false); break;
-		case 2: open_target(uri, name, true, false); break;
-		case 3: add_target_to_active(uri, name); break;
-		case 4: open_target(uri, name, false, true); break;
-		case 5: copy_to_clipboard(uri); break;
+		case kMenuOpen: open_target(uri, name, false, false); break;
+		case kMenuPlay: open_target(uri, name, true, false); break;
+		case kMenuAddToPlaylist: add_target_to_active(uri, name); break;
+		case kMenuQueue: queue_target(uri, name); break;
+		case kMenuSync: open_target(uri, name, false, true); break;
+		case kMenuFollow: set_follow_target(uri, name, kind, !followed); break;
+		case kMenuRename: rename_playlist(uri, name); break;
+		case kMenuDelete: delete_playlist(uri, name); break;
+		case kMenuNewPlaylist: new_playlist(); break;
+		case kMenuCopy: copy_to_clipboard(uri); break;
 		default: break;
 		}
 		return 0;
@@ -1111,6 +1519,15 @@ private:
 	uint32_t m_next_node_id = 0;
 	uint32_t m_pending_click = 0;
 	ULONGLONG m_ignore_click_until = 0;
+
+	// Follow state for the context menu, refreshed in the background.
+	struct follow_state {
+		bool following = false;
+		ULONGLONG at = 0;
+	};
+	static constexpr ULONGLONG kFollowTtlMs = 5ULL * 60 * 1000;
+	std::map<std::string, follow_state> m_follow_cache;
+	std::set<std::string> m_follow_inflight;
 
 	std::vector<library_section> m_library;
 	bool m_library_loading = false;

@@ -109,11 +109,12 @@ func (m *Manager) buildLibrary(ctx context.Context, env *Env) ([]Section, error)
 	var (
 		collection, artistSet []collectionEntry
 		rootlist              *playlist4pb.SelectedListContent
+		recentURIs            []string
 		collErr, artistErr    error
-		rootErr               error
+		rootErr, recentErr    error
 	)
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		collection, collErr = fetchCollection(ctx, env, spclient.CollectionSetLikedSongs)
@@ -125,6 +126,10 @@ func (m *Manager) buildLibrary(ctx context.Context, env *Env) ([]Section, error)
 	go func() {
 		defer wg.Done()
 		rootlist, rootErr = fetchRootlist(ctx, env, username)
+	}()
+	go func() {
+		defer wg.Done()
+		recentURIs, recentErr = fetchRecentlyPlayed(ctx, env, username)
 	}()
 	wg.Wait()
 
@@ -140,6 +145,9 @@ func (m *Manager) buildLibrary(ctx context.Context, env *Env) ([]Section, error)
 	if rootErr != nil {
 		m.log.WithError(rootErr).Warnf("library: reading the playlist rootlist failed")
 	}
+	if recentErr != nil {
+		m.log.WithError(recentErr).Warnf("library: reading recently played failed")
+	}
 
 	liked := collectionURIs(collection, "spotify:track:")
 	albumURIs := collectionURIs(collection, "spotify:album:")
@@ -149,17 +157,31 @@ func (m *Manager) buildLibrary(ctx context.Context, env *Env) ([]Section, error)
 	albumByURI := m.albumItems(ctx, env, albumURIs)
 	artistByURI := m.artistItems(ctx, env, artistURIs)
 
+	// Top tracks and top artists have no source reachable from this session:
+	// the TOPTracks/TOPARTISTS context upstream (hm://context-user/...) is not
+	// deployed (context resolve answers 404 "Could not find an upstream
+	// service"), the user-profile-view top routes answer 404, the profile view
+	// carries no top lists even with artist_limit, and the Web API answers 429.
+	// The sections stay present, empty, so the client can render them the same
+	// way whatever the account can serve.
+	m.log.Debugf("library: top tracks/artists have no reachable source on this login")
+
 	return []Section{
 		{ID: "liked", Title: "Liked Songs", Items: []Item{likedItem(username, liked)}},
 		{ID: "made_for_you", Title: "Made for you", Items: madeFor},
 		{ID: "playlists", Title: "Your playlists", Items: playlists},
 		{ID: "albums", Title: "Albums", Items: itemsOrdered(albumURIs, albumByURI)},
 		{ID: "artists", Title: "Artists", Items: itemsOrdered(artistURIs, artistByURI)},
+		{ID: "recently_played", Title: "Recently played", Items: m.recentlyPlayedItems(ctx, env, recentURIs, username)},
+		{ID: "top_tracks", Title: "Top tracks", Items: []Item{}},
+		{ID: "top_artists", Title: "Top artists", Items: []Item{}},
 	}, nil
 }
 
 // fetchRootlist walks the user's rootlist. Items and their decorated metadata
-// come back in parallel slices; folders are skipped by splitRootlist.
+// come back in parallel slices; folders are skipped by splitRootlist. Every
+// page reports the whole list's revision; the first one is kept because
+// rootlist changes have to be based on it.
 func fetchRootlist(ctx context.Context, env *Env, username string) (*playlist4pb.SelectedListContent, error) {
 	all := &playlist4pb.SelectedListContent{Contents: &playlist4pb.ListItems{}}
 
@@ -172,6 +194,9 @@ func fetchRootlist(ctx context.Context, env *Env, username string) (*playlist4pb
 		items := page.GetContents().GetItems()
 		all.Contents.Items = append(all.Contents.Items, items...)
 		all.Contents.MetaItems = append(all.Contents.MetaItems, page.GetContents().GetMetaItems()...)
+		if len(all.GetRevision()) == 0 && len(page.GetRevision()) > 0 {
+			all.Revision = page.GetRevision()
+		}
 
 		from += len(items)
 		if len(items) == 0 || from >= int(page.GetLength()) || from >= maxRootlistEntries {
@@ -191,8 +216,8 @@ func itemsOrdered(uris []string, byURI map[string]Item) []Item {
 
 // Search asks Spotify for tracks matching query and describes the albums and
 // artists those tracks belong to. Spotify's internal search context only lists
-// tracks, and no album, artist or playlist search endpoint is reachable from a
-// go-librespot session, so the other lists are derived from the results.
+// tracks; the playlists come from Spotify's search service, the albums and
+// artists are derived from the matching tracks.
 func (m *Manager) Search(ctx context.Context, query string, limit int) (*SearchResult, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -239,23 +264,25 @@ func (m *Manager) Search(ctx context.Context, query string, limit int) (*SearchR
 	tracks := m.buildInfos(replyURIs, metas, defaultBitrate)
 
 	var albumByURI, artistByURI map[string]Item
+	var playlists []Item
 	err = m.Do(ctx, func(env *Env) error {
 		albumByURI = m.albumItems(ctx, env, albumURIs)
 		artistByURI = m.artistItems(ctx, env, artistURIs)
+		playlists = m.searchPlaylistItems(ctx, env, query, limit)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	m.log.Debugf("search %q: %d tracks, %d albums, %d artists in %s (no playlist search endpoint is reachable)",
-		query, len(tracks), len(albumURIs), len(artistURIs), time.Since(start).Round(time.Millisecond))
+	m.log.Debugf("search %q: %d tracks, %d albums, %d artists, %d playlists in %s",
+		query, len(tracks), len(albumURIs), len(artistURIs), len(playlists), time.Since(start).Round(time.Millisecond))
 
 	return &SearchResult{
 		Tracks:    tracks,
 		Albums:    itemsOrdered(albumURIs, albumByURI),
 		Artists:   itemsOrdered(artistURIs, artistByURI),
-		Playlists: []Item{},
+		Playlists: playlists,
 	}, nil
 }
 

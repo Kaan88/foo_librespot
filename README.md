@@ -9,9 +9,9 @@ It is built on [go-librespot](https://github.com/devgianlu/go-librespot), an ope
 ## Features
 
 - **Plays `spotify:track:` entries like local files**: sample-accurate seeking, 96 / 160 / 320 kbps, and your output device, DSPs and ReplayGain all apply.
-- **Spotify panel** (a Default UI element): search, Liked Songs, saved albums, followed artists (with their albums and singles), Made for you (Daily Mixes, Discover Weekly, Release Radar) and your playlists. Click an entry to open it as a foobar2000 playlist; double-click to play it.
-- **Synced playlists**: a Spotify playlist, album or Liked Songs becomes a foobar2000 playlist called `Spotify · <name>`. It stays in step with Spotify (new tracks added, removed ones dropped, order kept) when you open it, on a timer and through **Library > Sync Spotify playlists**. You can detach a playlist to keep it as it is.
-- **Right-click Spotify submenu**: Save to / Remove from Liked Songs, Open album, Open artist, Start radio, Add to Spotify playlist, Copy link.
+- **Spotify panel** (a Default UI element): search, Liked Songs, saved albums, followed artists (with their albums and singles), Made for you (Daily Mixes, Discover Weekly, Release Radar), your playlists and Recently played. Click an entry to open it as a foobar2000 playlist; double-click to play it. Right-click an artist, album or playlist to follow it or save it (or remove it from your library), create, rename and delete playlists, and add an album, playlist or track to the playback queue.
+- **Synced playlists**: a Spotify playlist, album or Liked Songs becomes a foobar2000 playlist called `Spotify · <name>`. It stays in step with Spotify (new tracks added, removed ones dropped, order kept) when you open it, on a timer and through **Library > Sync Spotify playlists**. To take tracks out of the Spotify playlist itself, select them and use **Spotify > Remove from Spotify playlist**. You can detach a playlist to keep it as it is.
+- **Right-click Spotify submenu**: Save to / Remove from Liked Songs, Open album, Open artist, Start radio, Add to Spotify playlist, Remove from Spotify playlist, Copy link.
 - **Add links**: **File > Add Spotify link...** takes track, album and playlist links (`spotify:...` or `https://open.spotify.com/...`). You can also paste links or drop them onto a playlist.
 - **Tags, album art and ReplayGain**: title, artists, album, album artist, track/disc number and year; front covers; track and album gain from Spotify's loudness data.
 - **Audio cache**: tracks you've played are kept locally (default 1 GB, adjustable from Off to 10 GB), so replays don't need the network.
@@ -80,7 +80,7 @@ See [`bridge/README.md`](bridge/README.md) and [`component/README.md`](component
 ## Limitations
 
 - Spotify Premium only; free accounts can't stream through librespot.
-- Search returns tracks, plus the albums and artists of those tracks. Searching for playlists isn't possible from this kind of login.
+- Search returns tracks, albums, artists and playlists. Top tracks and top artists aren't reachable from this kind of login, so the panel doesn't show them.
 - Default UI only. There is no Columns UI panel yet.
 - Spotify Connect (controlling foobar2000 from your phone) isn't there yet. It's the next item on the [roadmap](ROADMAP.md).
 - Seek accuracy relies on an internal go-librespot value. If a future go-librespot changes it, seeking stays exact but gets slower.

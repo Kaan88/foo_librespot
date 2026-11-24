@@ -12,7 +12,7 @@ implemented by `bin/librespot-bridge.exe`.
 ```
 bridge/
   cmd/bridge/            librespot-bridge.exe (pipe server, `login`)
-  cmd/bridgectl/         bridgectl.exe (status/resolve/info/library/search/artist/open-to-wav client)
+  cmd/bridgectl/         bridgectl.exe (protocol client for manual testing)
   cmd/spike/             Phase 0 tool: `login`, `dump <track> <out.wav>`
   internal/bridge/       protocol types, named-pipe server, streaming loop
   internal/spotifyx/     shared session, country, metadata, resolve, sample-exact open
@@ -92,9 +92,12 @@ librespot-bridge.exe login
 One request per connection: one JSON line in, one JSON line out. `open` keeps
 the connection and follows the header with raw little-endian float32 PCM until
 the end of the track, then closes. Ops: `status`, `resolve`, `info`, `open`,
-plus the Phase 3 `library`, `search` and `artist`. Errors carry `code` ∈
-`not_logged_in | unavailable | bad_request | internal | unsupported`. See
-`../proto/PROTOCOL.md` for the exact shapes.
+`library`, `search`, `artist`, `saved`/`save`/`unsave`, `playlist_add`,
+`follow`/`unfollow`/`following`, `playlist_create`/`rename`/`delete`/`remove`,
+`radio`, `config`. Errors carry `code` ∈
+`not_logged_in | unavailable | bad_request | internal | unsupported` (plus the
+v4 codes in `../proto/PROTOCOL.md`). See `../proto/PROTOCOL.md` for the exact
+shapes.
 
 `status` answers immediately from cached state (it never waits for the
 session), so a client can always ask what is going on. A request that needs the
@@ -184,17 +187,24 @@ involved.
   the Spotify-owned "made for you" playlists, and the collection service's
   `collection` set for Liked Songs and saved albums plus the `artist` set for
   followed artists. Album and artist names, covers and portraits come from
-  batched `ALBUM_V4`/`ARTIST_V4` extended metadata. The four sources are fetched
-  in parallel; the reply is cached for 30 s, so reopening the tab is instant.
+  batched `ALBUM_V4`/`ARTIST_V4` extended metadata. The five sources are
+  fetched in parallel; the reply is cached for 30 s, so reopening the tab is
+  instant.
+- `recently_played` comes from Spotify's recently-played service
+  (`/recently-played/v3/user/<u>/recently-played?format=json&...`), which lists
+  contexts rather than tracks. Albums, artists and Liked Songs are described
+  like their library sections; playlists get name, owner, picture and revision
+  from the playlist service. `top_tracks` and `top_artists` are returned empty:
+  no top-list source is reachable from this login (the TOPTracks/TOPARTISTS
+  context upstream is not deployed, the profile view's top routes answer 404,
+  and the Web API answers 429); see PROTOCOL.md for the evidence.
 - `search` asks the context resolver for `spotify:search:<query>`, which is
-  Spotify's internal search list: up to 20 tracks. No album, artist or playlist
-  search endpoint is reachable from a go-librespot session (the mercury
-  `searchview` routes answer 404 and `api.spotify.com` answers 429 for the
-  login5 token), so the reply's `albums` and `artists` are the albums and
-  artists of those matching tracks, limited to the request's limit, and
-  `playlists` is empty. They are real entities, not placeholders, but they are
-  derived from the track results rather than being a category search of their
-  own.
+  Spotify's internal search list: up to 20 tracks. Playlists come from
+  Spotify's search service (`/searchview/km/v4/search/<query>`), which needs
+  `platform=WebPlayer&clientVersion=...` in the query and answers with hits
+  carrying URI, name, owner and image. Its albums and artists could be used
+  too, but the reply keeps deriving those from the matching tracks. A search
+  service failure only empties `playlists`; the tracks still answer.
 - `artist` reads `ARTIST_V4` (top tracks for the account's country, album
   groups, single groups) and resolves the release names and covers with batched
   `ALBUM_V4`.
@@ -261,6 +271,29 @@ of the AUDIO_FILES response, same formula as the track gain (see PROTOCOL.md).
 With `--debug`, an `open` also logs the ogg header's own gains next to the
 AUDIO_FILES-derived ones (header read through reflection, logging only).
 
+### Following and playlist management
+
+All writes go through spclient and are never resent blindly (a 409 is the only
+retry, once, with a fresh revision):
+
+- `follow` / `unfollow` accept artist, album and playlist URIs. Artists use the
+  collection `artist` set, albums the collection `collection` set, playlists
+  the rootlist (`POST /playlist/v2/user/<u>/rootlist/changes`, ADD `add_first`
+  at the top / REM at the entry's index). `following` answers collection
+  contains for artists and albums and rootlist membership for playlists.
+- `playlist_create` posts a playlist4 `ListUpdateRequest` (name) to
+  `/playlist/v2/playlist` and adds the new playlist to the top of the rootlist.
+- `playlist_rename` sends an `UPDATE_LIST_ATTRIBUTES` change;
+  `playlist_delete` removes the entry from the rootlist (Spotify has no
+  delete).
+- `playlist_remove` validates every `{uri,index}` against the current contents
+  and sends one REM per index, highest first, so a moved playlist answers
+  `bad_request` instead of removing the wrong track.
+- Every write op has `dry_run`, which returns the request it would send.
+- `search` playlists come from `/searchview/km/v4/search/<query>` with
+  `platform=WebPlayer&clientVersion=...` (without a client version the service
+  answers 400).
+
 ### Item images
 
 Covers and portraits are the largest `i.scdn.co` image of the metadata. A
@@ -310,6 +343,12 @@ bridgectl [--pipe <name>] search <query> [--limit N]
 bridgectl [--pipe <name>] artist <uri-or-url>
 bridgectl [--pipe <name>] saved|save|unsave <track-uri>...
 bridgectl [--pipe <name>] playlist-add <playlist-uri> <track-uri>... [--dry-run]
+bridgectl [--pipe <name>] follow|unfollow <artist|album|playlist uri>... [--dry-run]
+bridgectl [--pipe <name>] following <artist|album|playlist uri>...
+bridgectl [--pipe <name>] playlist-create <name> [--dry-run]
+bridgectl [--pipe <name>] playlist-rename <playlist-uri> <name> [--dry-run]
+bridgectl [--pipe <name>] playlist-delete <playlist-uri> [--dry-run]
+bridgectl [--pipe <name>] playlist-remove <playlist-uri> <index>:<track-uri>... [--dry-run]
 bridgectl [--pipe <name>] radio <track|artist|album|playlist uri>
 bridgectl [--pipe <name>] open-to-wav <uri> <out.wav>
           [--start-ms N] [--seconds S] [--bitrate 96|160|320]
@@ -371,6 +410,28 @@ Phase 3, measured on the same account:
   for 500 of them then took 29 ms.
 - `info spotify:track:4odb2UIgc0u22MNV7p4iQq --bitrate 320` → `vorbis` /
   `320`; with `--bitrate 96` → `vorbis` / `96`.
+
+v5 additions, measured on the same account:
+
+- `library` → liked 1, made for you 8, playlists 25, albums 28, artists 5,
+  recently played 2, top tracks 0, top artists 0 in 900 ms cold (from the
+  recently-played service plus two playlist metadata reads); from the 30 s
+  cache 0 ms. The recently-played items (an album and a playlist) came with
+  cover, and the playlist with its revision.
+- `search "nation of language" --limit 5` → 5 tracks, 5 albums, 5 artists,
+  5 playlists in 1.26 s; the playlists are Nation of Language Mix/Radio,
+  This Is Nation of Language and two user setlists.
+- `following` with a followed artist, a saved album, a followed playlist,
+  Today's Top Hits, an unsaved album and an unfollowed artist →
+  `[true,true,true,false,false,false]` in 537 ms.
+- `--dry-run` of follow (collection `artist`/`collection` writes plus a
+  rootlist ADD `add_first`), unfollow (`is_removed` plus a REM at index 2),
+  playlist-create (`ListUpdateRequest`), playlist-rename
+  (`UPDATE_LIST_ATTRIBUTES`) and playlist-remove (REM 1 then REM 0) returned
+  the exact requests in 83–166 ms. A wrong `{uri,index}` answered
+  `bad_request` naming the track that is actually there, and nothing was sent.
+- No real write was issued during verification; a follow dry run left
+  `following` unchanged.
 
 ## Notes and limits
 

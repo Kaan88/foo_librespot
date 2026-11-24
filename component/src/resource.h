@@ -3,6 +3,7 @@
 
 #define IDD_PREFERENCES 201
 #define IDD_ADD_LINK    202
+#define IDD_PLAYLIST_NAME 203
 
 #define IDC_STATUS      1001
 #define IDC_LOGIN       1002
@@ -15,3 +16,4 @@
 #define IDC_CACHE       1009
 #define IDC_CACHE_CLEAR 1010
 #define IDC_CACHE_INFO  1011
+#define IDC_PLAYLIST_NAME 1012

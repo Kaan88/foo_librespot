@@ -157,6 +157,18 @@ func (s *Server) handle(conn net.Conn) {
 		s.setSaved(ctx, conn, &req)
 	case "playlist_add":
 		s.playlistAdd(ctx, conn, &req)
+	case "follow", "unfollow":
+		s.setFollow(ctx, conn, &req)
+	case "following":
+		s.following(ctx, conn, &req)
+	case "playlist_create":
+		s.playlistCreate(ctx, conn, &req)
+	case "playlist_rename":
+		s.playlistRename(ctx, conn, &req)
+	case "playlist_delete":
+		s.playlistDelete(ctx, conn, &req)
+	case "playlist_remove":
+		s.playlistRemove(ctx, conn, &req)
 	case "radio":
 		s.radio(ctx, conn, &req)
 	case "config":
@@ -251,6 +263,88 @@ func (s *Server) playlistAdd(ctx context.Context, conn net.Conn, req *request) {
 		return
 	}
 	s.writeJSON(conn, playlistAddResponse{OK: true, Revision: res.Revision, DryRun: req.DryRun, Request: res.Request})
+}
+
+func (s *Server) following(ctx context.Context, conn net.Conn, req *request) {
+	if len(req.URIs) == 0 {
+		s.writeError(conn, badRequest("following needs a non-empty uris array"))
+		return
+	}
+	following, err := s.mgr.Following(ctx, req.URIs)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, followResponse{OK: true, Following: following})
+}
+
+func (s *Server) setFollow(ctx context.Context, conn net.Conn, req *request) {
+	requests, err := s.mgr.SetFollow(ctx, req.URIs, req.Op == "follow", req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, followWriteResponse{OK: true, DryRun: req.DryRun, Requests: requests})
+}
+
+func (s *Server) playlistCreate(ctx context.Context, conn net.Conn, req *request) {
+	res, err := s.mgr.PlaylistCreate(ctx, req.Name, req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	resp := playlistCreateResponse{OK: true, DryRun: req.DryRun, Requests: res.Requests}
+	if !req.DryRun {
+		resp.Playlist = &res.Playlist
+		resp.Revision = res.Revision
+	}
+	s.writeJSON(conn, resp)
+}
+
+func (s *Server) playlistRename(ctx context.Context, conn net.Conn, req *request) {
+	res, err := s.mgr.PlaylistRename(ctx, req.Playlist, req.Name, req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, playlistChangeResponse{
+		OK: true, Revision: res.Revision, DryRun: req.DryRun, Request: res.Request,
+	})
+}
+
+func (s *Server) playlistDelete(ctx context.Context, conn net.Conn, req *request) {
+	res, err := s.mgr.PlaylistDelete(ctx, req.Playlist, req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, playlistChangeResponse{
+		OK: true, Revision: res.Revision, DryRun: req.DryRun, Request: res.Request,
+	})
+}
+
+func (s *Server) playlistRemove(ctx context.Context, conn net.Conn, req *request) {
+	if len(req.Items) == 0 {
+		s.writeError(conn, badRequest("playlist_remove needs a non-empty items array"))
+		return
+	}
+	items := make([]spotifyx.PlaylistItemRef, len(req.Items))
+	for i, item := range req.Items {
+		if item.Index == nil {
+			s.writeError(conn, badRequest(fmt.Sprintf("items[%d] needs an index", i)))
+			return
+		}
+		items[i] = spotifyx.PlaylistItemRef{URI: item.URI, Index: *item.Index}
+	}
+
+	res, err := s.mgr.PlaylistRemove(ctx, req.Playlist, items, req.DryRun)
+	if err != nil {
+		s.writeError(conn, err)
+		return
+	}
+	s.writeJSON(conn, playlistChangeResponse{
+		OK: true, Revision: res.Revision, DryRun: req.DryRun, Request: res.Request,
+	})
 }
 
 func (s *Server) radio(ctx context.Context, conn net.Conn, req *request) {
@@ -523,8 +617,18 @@ func describe(req *request) string {
 		return fmt.Sprintf("open %s at %d ms", uri, start)
 	case "saved", "save", "unsave":
 		return fmt.Sprintf("%s with %d uris", req.Op, len(req.URIs))
+	case "follow", "unfollow", "following":
+		return fmt.Sprintf("%s with %d uris (dry_run=%v)", req.Op, len(req.URIs), req.DryRun)
 	case "playlist_add":
 		return fmt.Sprintf("playlist_add %s with %d uris (dry_run=%v)", req.Playlist, len(req.URIs), req.DryRun)
+	case "playlist_create":
+		return fmt.Sprintf("playlist_create %q (dry_run=%v)", req.Name, req.DryRun)
+	case "playlist_rename":
+		return fmt.Sprintf("playlist_rename %s to %q (dry_run=%v)", req.Playlist, req.Name, req.DryRun)
+	case "playlist_delete":
+		return fmt.Sprintf("playlist_delete %s (dry_run=%v)", req.Playlist, req.DryRun)
+	case "playlist_remove":
+		return fmt.Sprintf("playlist_remove %s with %d items (dry_run=%v)", req.Playlist, len(req.Items), req.DryRun)
 	case "search":
 		return fmt.Sprintf("search %q (limit %d)", req.Query, requestedLimit(req))
 	default:

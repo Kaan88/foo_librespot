@@ -99,6 +99,169 @@ std::string plural(size_t count, const char* one, const char* many) {
 	return std::to_string(count) + " " + (count == 1 ? one : many);
 }
 
+// --- removing tracks from the Spotify playlist ---------------------------------
+
+struct removal_target {
+	std::string uri;
+	int index = 0;
+};
+
+// The active playlist, when it is a synced Spotify playlist (not an album,
+// Liked Songs, radio or a detached playlist).
+bool active_spotify_playlist(t_size& playlist, std::string& context) {
+	playlist_manager::ptr manager = playlist_manager::get();
+	const t_size active = manager->get_active_playlist();
+	if (active == pfc::infinite_size) return false;
+	std::string stored;
+	if (!flp::playlist_context(active, stored)) return false;
+	if (stored.rfind("spotify:playlist:", 0) != 0) return false;
+	if (flp::is_static_playlist(active)) return false;
+	playlist = active;
+	context = stored;
+	return true;
+}
+
+// Builds the request from the active playlist's selection: `data` must be
+// exactly that selection, so every position is one the user actually selected.
+bool build_removal(metadb_handle_list_cref data, t_size playlist,
+	std::vector<removal_target>& out) {
+	if (data.get_count() == 0) return false;
+
+	std::map<std::string, int> wanted;
+	for (t_size i = 0; i < data.get_count(); ++i) {
+		const char* path = data[i]->get_path();
+		if (path == nullptr || !flp::is_spotify_track_path(path)) return false;
+		++wanted[path];
+	}
+
+	playlist_manager::ptr manager = playlist_manager::get();
+	const t_size count = manager->playlist_get_item_count(playlist);
+	bit_array_bittable selection(count);
+	manager->playlist_get_selection_mask(playlist, selection);
+
+	std::vector<std::pair<std::string, t_size>> positions;
+	for (t_size i = 0; i < count; ++i) {
+		if (!selection.get(i)) continue;
+		metadb_handle_ptr handle;
+		if (!manager->playlist_get_item_handle(handle, playlist, i)) return false;
+		const char* path = handle->get_path();
+		if (path == nullptr || !flp::is_spotify_track_path(path)) return false;
+		positions.emplace_back(path, i);
+	}
+	if (positions.size() != data.get_count()) return false;
+
+	out.clear();
+	std::set<t_size> used;
+	for (const auto& position : positions) {
+		const auto found = wanted.find(position.first);
+		if (found == wanted.end() || found->second <= 0) return false;
+		--found->second;
+		if (!used.insert(position.second).second) return false;
+		out.push_back(removal_target{ position.first, static_cast<int>(position.second) });
+	}
+	for (const auto& entry : wanted) {
+		if (entry.second != 0) return false;
+	}
+	return !out.empty();
+}
+
+std::string playlist_label(t_size playlist) {
+	pfc::string8 name;
+	if (playlist_manager::get()->playlist_get_name(playlist, name)) return name.get_ptr();
+	return "the playlist";
+}
+
+// Main thread. Removes the already-removed-on-Spotify tracks from the local
+// copy and stores the returned revision so the next sync does not re-add them.
+void apply_removal(const std::string& context, const std::vector<flp::playlist_item_ref>& refs,
+	const std::string& revision) {
+	playlist_manager::ptr manager = playlist_manager::get();
+	const t_size playlist = flp::find_playlist_by_context(context);
+	if (playlist == pfc::infinite_size) {
+		show_message("The Spotify playlist is no longer linked to a foobar2000 playlist.", true);
+		return;
+	}
+
+	const t_size count = manager->playlist_get_item_count(playlist);
+	bit_array_bittable mask(count);
+	for (const flp::playlist_item_ref& ref : refs) {
+		const t_size index = static_cast<t_size>(ref.index);
+		metadb_handle_ptr handle;
+		if (index >= count || !manager->playlist_get_item_handle(handle, playlist, index)) {
+			show_message("The playlist changed while the tracks were being removed.\n"
+				"Sync it and try again.", true);
+			return;
+		}
+		const char* path = handle->get_path();
+		if (path == nullptr || ref.uri != path) {
+			show_message("The playlist changed while the tracks were being removed.\n"
+				"Sync it and try again.", true);
+			return;
+		}
+		mask.set(index, true);
+	}
+	if (!manager->playlist_remove_items(playlist, mask)) {
+		show_message("The playlist is locked.", true);
+		return;
+	}
+	flp::set_playlist_revision(playlist, revision);
+	log_line("removed " + plural(refs.size(), "track", "tracks") + " from \"" +
+		playlist_label(playlist) + "\" on Spotify");
+}
+
+void action_remove_from_playlist(metadb_handle_list_cref data) {
+	t_size playlist = pfc::infinite_size;
+	std::string context;
+	if (!active_spotify_playlist(playlist, context)) return;
+
+	std::vector<removal_target> targets;
+	if (!build_removal(data, playlist, targets)) {
+		show_message("Select the tracks in the synced Spotify playlist to remove.", true);
+		return;
+	}
+	const std::string name = playlist_label(playlist);
+	if (targets.size() > 1) {
+		const std::string message = "Remove " + std::to_string(targets.size()) + " tracks from \"" +
+			name + "\" on Spotify?\n\nThey are removed from this foobar2000 playlist too.";
+		popup_message_v3::query_t query;
+		query.title = "Remove from Spotify playlist";
+		query.msg = message.c_str();
+		query.buttons = popup_message_v3::buttonYes | popup_message_v3::buttonNo;
+		query.defButton = popup_message_v3::buttonNo;
+		query.icon = popup_message_v3::iconQuestion;
+		query.wndParent = core_api::get_main_window();
+		if (popup_message_v3::get()->show_query_modal(query) != popup_message_v3::buttonYes) return;
+	}
+
+	std::vector<flp::playlist_item_ref> refs;
+	refs.reserve(targets.size());
+	for (const removal_target& target : targets) {
+		refs.push_back(flp::playlist_item_ref{ target.uri, target.index });
+	}
+
+	fb2k::splitTask([context, refs] {
+		std::string revision;
+		std::string error;
+		try {
+			flp::ensure_bridge_started(fb2k::mainAborter());
+			flp::bridge_client client;
+			revision = client.playlist_remove(context, refs, flp::cancel_token());
+		} catch (const flp::cancelled&) {
+			return;
+		} catch (const std::exception& failure) {
+			error = flp::user_error_message(failure);
+		}
+		fb2k::inMainThread([context, refs, revision, error] {
+			if (!error.empty()) {
+				log_line(error);
+				show_message(error, true);
+				return;
+			}
+			apply_removal(context, refs, revision);
+		});
+	});
+}
+
 // --- caches ---------------------------------------------------------------------
 
 struct editable_playlist {
@@ -354,6 +517,7 @@ enum item_index : unsigned {
 	item_artist,
 	item_radio,
 	item_copy_link,
+	item_remove_playlist,
 	item_count,
 };
 
@@ -369,6 +533,7 @@ public:
 		case item_artist: out = "Open artist"; break;
 		case item_radio: out = "Start radio"; break;
 		case item_copy_link: out = "Copy Spotify link"; break;
+		case item_remove_playlist: out = "Remove from Spotify playlist"; break;
 		default: break;
 		}
 	}
@@ -387,6 +552,9 @@ public:
 		case item_artist: out = "Opens the top tracks of the track's artist as a playlist"; return true;
 		case item_radio: out = "Opens a Spotify radio based on the selected track"; return true;
 		case item_copy_link: out = "Copies open.spotify.com links to the clipboard"; return true;
+		case item_remove_playlist:
+			out = "Removes the selected tracks from this Spotify playlist and from foobar2000";
+			return true;
 		default: return false;
 		}
 	}
@@ -400,6 +568,14 @@ public:
 		const std::vector<std::string> uris = selected_track_uris(data);
 		if (uris.empty()) return false;
 		get_item_name(index, out);
+
+		if (index == item_remove_playlist) {
+			t_size playlist = pfc::infinite_size;
+			std::string context;
+			std::vector<removal_target> targets;
+			if (!active_spotify_playlist(playlist, context)) return false;
+			return build_removal(data, playlist, targets);
+		}
 
 		if (index == item_save || index == item_unsave) {
 			if (uris.size() == 1) {
@@ -425,6 +601,7 @@ public:
 		case item_artist: action_open_artist(uris); break;
 		case item_radio: action_radio(uris); break;
 		case item_copy_link: action_copy_links(uris); break;
+		case item_remove_playlist: action_remove_from_playlist(data); break;
 		default: break;
 		}
 	}

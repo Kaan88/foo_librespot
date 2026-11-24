@@ -31,7 +31,7 @@ func TestTrackURIs(t *testing.T) {
 
 func TestBuildCollectionWrite(t *testing.T) {
 	now := time.Unix(1700000000, 0)
-	body, err := buildCollectionWrite("u1", []string{tA}, false, now)
+	body, err := buildCollectionWrite("u1", "collection", []string{tA}, false, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestBuildCollectionWrite(t *testing.T) {
 		t.Errorf("save item = %v", it)
 	}
 
-	body, _ = buildCollectionWrite("u1", []string{tA}, true, now)
+	body, _ = buildCollectionWrite("u1", "collection", []string{tA}, true, now)
 	req.Reset()
 	_ = proto.Unmarshal(body, &req)
 	if it := req.GetItems()[0]; !it.GetIsRemoved() || it.GetAddedAt() != 0 {
@@ -56,7 +56,7 @@ func TestBuildCollectionWrite(t *testing.T) {
 }
 
 func TestContainsRoundTrip(t *testing.T) {
-	body, err := buildCollectionContains("u1", []string{tA, tB})
+	body, err := buildCollectionContains("u1", "collection", []string{tA, tB})
 	if err != nil {
 		t.Fatal(err)
 	}

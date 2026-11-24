@@ -35,12 +35,22 @@ type request struct {
 	Bitrate *int     `json:"bitrate"`
 	Query   string   `json:"query"`
 	Limit   *int     `json:"limit"`
-	// Playlist and DryRun belong to playlist_add.
+	// Playlist, Name and DryRun belong to the playlist and follow ops.
 	Playlist string `json:"playlist"`
+	Name     string `json:"name"`
 	DryRun   bool   `json:"dry_run"`
+	// Items belongs to playlist_remove.
+	Items []playlistItemRef `json:"items"`
 	// CacheMB and ClearCache belong to config.
 	CacheMB    *int `json:"cache_mb"`
 	ClearCache bool `json:"clear_cache"`
+}
+
+// playlistItemRef is one item of a playlist_remove request. The index is
+// mandatory: removing by URI alone could remove the wrong copy.
+type playlistItemRef struct {
+	URI   string `json:"uri"`
+	Index *int   `json:"index"`
 }
 
 type statusResponse struct {
@@ -113,6 +123,40 @@ type playlistAddResponse struct {
 	// DryRun and Request are set when nothing was sent.
 	DryRun  bool                      `json:"dry_run,omitempty"`
 	Request *spotifyx.PlaylistRequest `json:"request,omitempty"`
+}
+
+// followResponse answers "following" in request order.
+type followResponse struct {
+	OK        bool   `json:"ok"`
+	Following []bool `json:"following"`
+}
+
+// followWriteResponse answers follow/unfollow; a dry run carries the requests.
+type followWriteResponse struct {
+	OK       bool                        `json:"ok"`
+	DryRun   bool                        `json:"dry_run,omitempty"`
+	Requests []*spotifyx.PlaylistRequest `json:"requests,omitempty"`
+}
+
+// playlistCreateResponse answers playlist_create. A dry run carries the create
+// request (the rootlist entry can only be built once Spotify assigned an id).
+type playlistCreateResponse struct {
+	OK       bool                        `json:"ok"`
+	Playlist *spotifyx.Item              `json:"playlist,omitempty"`
+	Revision string                      `json:"revision,omitempty"`
+	DryRun   bool                        `json:"dry_run,omitempty"`
+	Requests []*spotifyx.PlaylistRequest `json:"requests,omitempty"`
+}
+
+// playlistChangeResponse answers playlist_rename, playlist_delete and
+// playlist_remove, and previews of them.
+type playlistChangeResponse struct {
+	OK       bool   `json:"ok"`
+	Revision string `json:"revision,omitempty"`
+	DryRun   bool   `json:"dry_run,omitempty"`
+	// Request and Requests are set for a dry run.
+	Request  *spotifyx.PlaylistRequest   `json:"request,omitempty"`
+	Requests []*spotifyx.PlaylistRequest `json:"requests,omitempty"`
 }
 
 type openHeader struct {

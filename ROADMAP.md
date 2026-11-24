@@ -47,6 +47,11 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 - Write actions (save, edit playlists, radio) need a Spotify Web API token. Check first that one can come from the existing librespot login.
 - Drag and drop or paste `open.spotify.com` / `spotify:` links straight into playlists. This needs a filesystem service for `spotify:` paths.
 
+### Phase 4b: library extras and playlist management ✅
+- Spotify panel: a Recently played section (hidden when empty), Follow / Unfollow for artists, albums and playlists, New playlist / Rename... / Delete..., and Add to playback queue for any context.
+- Remove from Spotify playlist in the track submenu: removes the selected tracks from Spotify (verified against the playlist's revision) and from the synced foobar2000 copy, keeping the stored revision in step.
+- Bridge: follow/unfollow/following, playlist create/rename/delete/remove, playlist search, and the recently-played/top sections. Top tracks/artists have no reachable source from this login, so they stay empty.
+
 ### Phase 5: polish (optional): cache, errors, album gain done; Spotify Connect left ⬅ next
 - ✅ Audio cache size setting (preferences: Off..10 GB, default 1 GB, Clear cache; `--cache-mb` at spawn, `config` op live). Verified in foobar2000 x64 (2026-11-23).
 - ✅ Clearer errors: `premium_required`, `rate_limited`, `region_unavailable`, `track_unavailable`; popup once per kind; unavailable tracks are skipped. Verified in foobar2000 x64 (2026-11-23).
@@ -61,4 +66,4 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
   - (b) change the script to treat paths starting with `spotify:` as Spotify.
   - Do (a) and tell the user which field to use.
 - **Seek accuracy relies on a private go-librespot value** (the Vorbis decoder's granule position, read through reflection). A go-librespot upgrade could break it; the bridge then decodes from the start of the track, which is exact but slower. Recheck after every go-librespot update.
-- **Known Phase 4 limits:** search can't return playlists (no endpoint reachable from this login); `playlist_add` hasn't had a real write yet (dry run only); dropping `https://open.spotify.com` URLs depends on foobar2000 asking our filesystem before its HTTP one.
+- **Known Phase 4 limits:** top tracks/artists aren't reachable from this login (the panel sections stay empty); playlist writes have only been exercised as dry runs against Spotify so far; dropping `https://open.spotify.com` URLs depends on foobar2000 asking our filesystem before its HTTP one.

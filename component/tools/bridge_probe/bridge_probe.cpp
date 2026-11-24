@@ -143,6 +143,49 @@ int run_playlist_add(flp::bridge_client& client, const std::string& playlist,
 	return 0;
 }
 
+int run_following(flp::bridge_client& client, const std::vector<std::string>& uris) {
+	const std::vector<bool> flags = client.following(uris, never_cancel());
+	std::printf("following");
+	for (const bool flag : flags) std::printf(" %s", flag ? "true" : "false");
+	std::printf("\n");
+	return flags.size() == uris.size() ? 0 : 4;
+}
+
+int run_follow(flp::bridge_client& client, bool follow, const std::vector<std::string>& uris) {
+	if (follow) client.follow(uris, never_cancel());
+	else client.unfollow(uris, never_cancel());
+	std::printf("%s ok count=%zu\n", follow ? "follow" : "unfollow", uris.size());
+	return 0;
+}
+
+int run_playlist_create(flp::bridge_client& client, const std::string& name) {
+	const flp::playlist_create_result created = client.playlist_create(name, never_cancel());
+	std::printf("playlist_create ok uri=%s name=%s revision=%s editable=%s\n",
+		created.playlist.uri.c_str(), created.playlist.name.c_str(), created.revision.c_str(),
+		created.playlist.editable ? "true" : "false");
+	return created.playlist.uri.empty() ? 4 : 0;
+}
+
+int run_playlist_rename(flp::bridge_client& client, const std::string& playlist,
+	const std::string& name) {
+	const std::string revision = client.playlist_rename(playlist, name, never_cancel());
+	std::printf("playlist_rename ok revision=%s\n", revision.c_str());
+	return 0;
+}
+
+int run_playlist_delete(flp::bridge_client& client, const std::string& playlist) {
+	client.playlist_delete(playlist, never_cancel());
+	std::printf("playlist_delete ok\n");
+	return 0;
+}
+
+int run_playlist_remove(flp::bridge_client& client, const std::string& playlist,
+	const std::vector<flp::playlist_item_ref>& items) {
+	const std::string revision = client.playlist_remove(playlist, items, never_cancel());
+	std::printf("playlist_remove ok count=%zu revision=%s\n", items.size(), revision.c_str());
+	return 0;
+}
+
 int run_radio(flp::bridge_client& client, const std::string& uri) {
 	const flp::resolve_result radio = client.radio(uri, never_cancel());
 	std::printf("radio count=%zu\n", radio.tracks.size());
@@ -292,7 +335,8 @@ int run_spawn(const std::wstring& directory, const std::wstring& pipeName, int c
 
 void usage() {
 	std::printf("usage: bridge_probe [--pipe NAME] <status|info|resolve|library|search|artist|"
-				"saved|save|unsave|playlist_add|radio|control|play|spawn> ...\n");
+				"saved|save|unsave|playlist_add|following|follow|unfollow|playlist_create|"
+				"playlist_rename|playlist_delete|playlist_remove|radio|control|play|spawn> ...\n");
 }
 
 } // namespace
@@ -412,6 +456,59 @@ int main(int argc, char** argv) {
 			}
 			return run_playlist_add(client, arguments[1],
 				std::vector<std::string>(arguments.begin() + 2, arguments.end()));
+		}
+
+		if (mode == "following" || mode == "follow" || mode == "unfollow") {
+			const std::vector<std::string> uris(arguments.begin() + 1, arguments.end());
+			if (uris.empty()) {
+				usage();
+				return 2;
+			}
+			if (mode == "following") return run_following(client, uris);
+			return run_follow(client, mode == "follow", uris);
+		}
+
+		if (mode == "playlist_create") {
+			if (arguments.size() < 2) {
+				usage();
+				return 2;
+			}
+			return run_playlist_create(client, arguments[1]);
+		}
+
+		if (mode == "playlist_rename") {
+			if (arguments.size() < 3) {
+				usage();
+				return 2;
+			}
+			return run_playlist_rename(client, arguments[1], arguments[2]);
+		}
+
+		if (mode == "playlist_delete") {
+			if (arguments.size() < 2) {
+				usage();
+				return 2;
+			}
+			return run_playlist_delete(client, arguments[1]);
+		}
+
+		if (mode == "playlist_remove") {
+			if (arguments.size() < 3) {
+				usage();
+				return 2;
+			}
+			std::vector<flp::playlist_item_ref> items;
+			for (size_t i = 2; i < arguments.size(); ++i) {
+				const std::string& value = arguments[i];
+				const size_t colon = value.rfind(':');
+				if (colon == std::string::npos) {
+					usage();
+					return 2;
+				}
+				items.push_back(flp::playlist_item_ref{ value.substr(0, colon),
+					std::atoi(value.substr(colon + 1).c_str()) });
+			}
+			return run_playlist_remove(client, arguments[1], items);
 		}
 
 		if (mode == "radio") {

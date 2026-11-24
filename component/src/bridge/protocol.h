@@ -99,6 +99,18 @@ struct library_section {
 	std::vector<library_item> items;
 };
 
+// One entry of a v5 playlist_remove request: the track URI the client saw at
+// that position in its copy of the playlist.
+struct playlist_item_ref {
+	std::string uri;
+	int index = 0;
+};
+
+struct playlist_create_result {
+	library_item playlist;
+	std::string revision;
+};
+
 struct resolve_result {
 	std::vector<track_info> tracks;
 	bool has_context = false;
@@ -175,6 +187,31 @@ public:
 	std::string playlist_add(const std::string& playlist, const std::vector<std::string>& uris,
 		const cancel_token& ct, unsigned connect_timeout_ms = 5000,
 		unsigned reply_timeout_ms = 30000);
+
+	// v5: whether artists, albums and playlists are in the user's library (same
+	// order as `uris`).
+	std::vector<bool> following(const std::vector<std::string>& uris, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+
+	// v5: follow artists, save albums or add playlists to the library (and the
+	// reverse).
+	void follow(const std::vector<std::string>& uris, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+	void unfollow(const std::vector<std::string>& uris, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+
+	// v5: playlist management. Create answers the new item and revision;
+	// rename and remove answer the playlist's new revision.
+	playlist_create_result playlist_create(const std::string& name, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+	std::string playlist_rename(const std::string& playlist, const std::string& name,
+		const cancel_token& ct, unsigned connect_timeout_ms = 5000,
+		unsigned reply_timeout_ms = 30000);
+	void playlist_delete(const std::string& playlist, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
+	std::string playlist_remove(const std::string& playlist,
+		const std::vector<playlist_item_ref>& items, const cancel_token& ct,
+		unsigned connect_timeout_ms = 5000, unsigned reply_timeout_ms = 30000);
 
 	// v3: radio based on a track, artist, album or playlist (resolve-shaped reply).
 	resolve_result radio(const std::string& uri, const cancel_token& ct,

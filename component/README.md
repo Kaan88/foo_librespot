@@ -6,8 +6,10 @@ foobar2000 v2 component that plays Spotify tracks by talking to the
 
 - Input: `spotify:track:<22-char id>` (44.1 kHz stereo float32 PCM from the bridge)
 - **Spotify** Default UI element: a search box and a library tree (Liked Songs,
-  saved albums, followed artists, made-for-you and your playlists); click an
-  entry to open it as a foobar2000 playlist, double-click to also start playing
+  saved albums, followed artists, made-for-you, your playlists and Recently
+  played); click an entry to open it as a foobar2000 playlist, double-click to
+  also start playing, right-click for follow/unfollow, playlist management and
+  the playback queue
 - Synced playlists named `Spotify · <name>`, tracked by the Spotify context URI
   and updated with a minimal diff on open, on a timer and on demand
 - File > **Add Spotify link...**: resolves track / album / playlist URIs and
@@ -25,12 +27,18 @@ ReFacets. It is a plain Win32 TreeView (comctl32); no ATL/WTL is required.
 
 - **Your library**: Liked Songs, Albums (saved), Artists (followed; expand an
   artist to load its albums and singles through the bridge `artist` op).
+- **Recently played** right below Your library; it is hidden when the bridge
+  reports no recent contexts.
 - **Made for you** and **Your playlists**.
 - Search: type in the box at the top and press Enter. Results appear in a
   temporary **Search results** node with Tracks / Albums / Artists / Playlists.
 - Single click opens an item as a foobar2000 playlist (and makes it active).
   Double click also starts playing it. The context menu has Open / Open and
-  play / Add to current playlist / Sync now / Copy link.
+  play / Add to current playlist / Add to playback queue / Sync now, then
+  Follow or Unfollow (albums: Save to Your Library / Remove from Your Library),
+  Rename... and Delete... for the user's own playlists, New playlist... on the
+  Your playlists node, and Copy link. Top tracks / Top artists sections appear
+  when a bridge fills them; today's bridge reports them empty.
 - The search, tree loads and every bridge call run on worker threads
   (`fb2k::splitTask`), and results return through `fb2k::inMainThread`; the UI
   never blocks. Loading, connecting, not-logged-in and error states are shown
@@ -70,6 +78,13 @@ the last applied revision.
 - Detach: **Edit > Detach from Spotify** for the active playlist, or right-click
   a playlist (tab/Playlist Manager) and choose **Detach from Spotify**. The
   playlist is kept, only the link is removed.
+- Removing tracks: select them in the foobar2000 copy of a synced Spotify
+  playlist and choose **Remove from Spotify playlist** (Spotify submenu). The
+  component sends each track's URI and its position in the foobar2000
+  playlist; the bridge verifies them against Spotify's current revision,
+  removes them there, and the returned revision is stored so the next sync
+  does not put them back. Albums, Liked Songs, radio and detached playlists
+  are not offered.
 - Playlists without the context property are never touched.
 
 ## Now-playing scripts: Spotify fields
@@ -160,6 +175,10 @@ host. Covered:
   samplerate, channels, bitrate, `REPLAYGAIN_TRACK_GAIN`/`PEAK` and album gains
 - the sync diff as a pure function (`tools/sync_plan_test`): inserts, removals,
   reorders, duplicates, protected playing item, complete replacement
+- v5 `following` / `follow` / `unfollow`, `playlist_create` / `rename` /
+  `delete` / `remove` (including stale-index and wrong-URI refusals) and the
+  new `recently_played` / `top_tracks` / `top_artists` sections, against both
+  fake bridges
 - bridge process spawning (`--parent-pid`, `--pipe`) and pipe wait
 
 Manual client use:
@@ -169,6 +188,9 @@ python tools\fake_bridge.py --pipe foo_librespot --duration-ms 5000
 build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot status
 build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot library
 build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot search "nation of language"
+build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot following spotify:artist:ID spotify:album:ID
+build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot playlist_create "New Mix"
+build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot playlist_remove spotify:playlist:ID spotify:track:ID:3
 build\tools\Release\x64\bridge_probe.exe --pipe foo_librespot play spotify:track:0123456789abcdefghijkl --frames all
 ```
 
