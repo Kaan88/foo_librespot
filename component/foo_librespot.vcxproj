@@ -166,6 +166,7 @@
     </ClCompile>
     <ClCompile Include="src\liked_cache.cpp" />
     <ClCompile Include="src\play_reporter.cpp" />
+    <ClCompile Include="src\spotify_tab_cui.cpp" />
     <ClCompile Include="src\bridge\json.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -203,6 +204,9 @@
   <ItemGroup>
     <ProjectReference Include="third_party\foobar2000_sdk\foobar2000\SDK\foobar2000_SDK.vcxproj">
       <Project>{e8091321-d79d-4575-86ef-064ea1a4a20d}</Project>
+    </ProjectReference>
+    <ProjectReference Include="third_party\foobar2000_sdk\columns_ui-sdk\columns_ui-sdk-public.vcxproj">
+      <Project>{93EC0EDE-01CD-4FB0-B8E8-4F2A027E026E}</Project>
     </ProjectReference>
     <ProjectReference Include="third_party\foobar2000_sdk\pfc\pfc.vcxproj">
       <Project>{ebfffb4e-261d-44d3-b89c-957b31a0bf9c}</Project>

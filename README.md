@@ -9,10 +9,11 @@ It is built on [go-librespot](https://github.com/devgianlu/go-librespot), an ope
 ## Features
 
 - **Plays `spotify:track:` entries like local files**: sample-accurate seeking, 96 / 160 / 320 kbps, and your output device, DSPs and ReplayGain all apply.
-- **Spotify panel** (a Default UI element): search, Liked Songs, saved albums, followed artists (with their albums and singles), Made for you (Daily Mixes, Discover Weekly, Release Radar), your playlists and Recently played. Click an entry to open it as a foobar2000 playlist; double-click to play it. Right-click an artist, album or playlist to follow it or save it (or remove it from your library), create, rename and delete playlists, and add an album, playlist or track to the playback queue.
-- **Synced playlists**: a Spotify playlist, album or Liked Songs becomes a foobar2000 playlist called `Spotify · <name>`. It stays in step with Spotify (new tracks added, removed ones dropped, order kept) when you open it, on a timer and through **Library > Sync Spotify playlists**. To take tracks out of the Spotify playlist itself, select them and use **Spotify > Remove from Spotify playlist**. You can detach a playlist to keep it as it is.
+- **Spotify panel** (a Default UI element, and a Columns UI panel): search, Liked Songs, saved albums, followed artists (with their albums and singles), Made for you (Daily Mixes, Discover Weekly, Release Radar), your playlists and Recently played. Click an entry to open it as a foobar2000 playlist; double-click to play it. Right-click an artist, album or playlist to follow it or save it (or remove it from your library), create, rename and delete playlists, and add an album, playlist or track to the playback queue. Drag tracks from the panel onto a playlist. The keyboard works too: Tab moves between the search box and the tree, and the Apps key or Shift+F10 opens the menu. **Copy link** copies an `https://open.spotify.com` link.
+- **Browse playlist**: tracks from search, artist pages and the Spotify submenu (artist top tracks, radio) open in one reusable `Spotify · Browse` playlist instead of a new playlist each time.
+- **Synced playlists**: a Spotify playlist, album or Liked Songs becomes a foobar2000 playlist called `Spotify · <name>`. It stays in step with Spotify (new tracks added, removed ones dropped, order kept) when you open it, on a timer and through **Library > Sync Spotify playlists**. To take tracks out of the Spotify playlist itself, select them and use **Spotify > Remove from Spotify playlist**. If a playlist is renamed on Spotify, the foobar2000 playlist follows (unless you renamed it yourself). Synced playlists are locked against edits in foobar2000, since the next sync would undo them. You can detach a playlist to unlock it and keep it as it is.
 - **Right-click Spotify submenu**: Save to / Remove from Liked Songs, Open album, Open artist, Start radio, Add to Spotify playlist, Remove from Spotify playlist, Copy link.
-- **Add links**: **File > Add Spotify link...** takes track, album and playlist links (`spotify:...` or `https://open.spotify.com/...`). You can also paste links or drop them onto a playlist.
+- **Add links**: **File > Add Spotify link...** takes track, album and playlist links (`spotify:...` or `https://open.spotify.com/...`) and resolves them in the background with a progress window you can cancel. You can also paste links or drop them onto a playlist.
 - **Tags, album art and ReplayGain**: title, artists, album, album artist, track/disc number and year; front covers and artist pictures; track and album gain from Spotify's loudness data.
 - **Liked Songs in title formatting**: `%spotify_liked%` is `1` for tracks in your Liked Songs, so `$if(%spotify_liked%,♥)` works in any column.
 - **Play reporting**: tracks you play in foobar2000 show up in Spotify's Recently played and listening history (can be turned off in the preferences).
@@ -64,7 +65,7 @@ You need Windows with:
 cd bridge
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 
-# 2. The component (downloads the foobar2000 SDK on first run) -> component\dist\foo_librespot.fb2k-component
+# 2. The component (downloads the foobar2000 and Columns UI SDKs on first run) -> component\dist\foo_librespot.fb2k-component
 cd ..\component
 .\scripts\fetch_sdk.ps1
 .\scripts\package.ps1
@@ -83,7 +84,7 @@ See [`bridge/README.md`](bridge/README.md) and [`component/README.md`](component
 
 - Spotify Premium only; free accounts can't stream through librespot.
 - Search returns tracks, albums, artists and playlists. Top tracks and top artists aren't reachable from this kind of login, so the panel doesn't show them.
-- Default UI only. There is no Columns UI panel yet.
+- Only tracks can be dragged out of the panel; albums and playlists have to be opened first.
 - Spotify Connect (controlling foobar2000 from your phone) isn't there yet. It's the next item on the [roadmap](ROADMAP.md).
 - Spotify tracks can only be played. Converting, ReplayGain scanning and other full decodes are refused (tags, art and columns still work).
 - Play reporting follows the desktop client's event format but has only been checked as a dry run, not against a live account.

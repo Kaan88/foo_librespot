@@ -206,7 +206,12 @@ void apply_removal(const std::string& context, const std::vector<flp::playlist_i
 		}
 		mask.set(index, true);
 	}
-	if (!manager->playlist_remove_items(playlist, mask)) {
+	bool removed = false;
+	{
+		flp::synced_playlist_edit allow; // synced playlists are locked against other edits
+		removed = manager->playlist_remove_items(playlist, mask);
+	}
+	if (!removed) {
 		show_message("The playlist is locked.", true);
 		return;
 	}

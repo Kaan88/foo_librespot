@@ -205,6 +205,11 @@ void test_links() {
 	check(flp::spotify_web_url("spotify:track:4uLU6hMCjMI75M1A2tKUQC") ==
 		"https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", "web URL from URI");
 	check(flp::spotify_web_url("nope").empty(), "web URL of a non-Spotify string is empty");
+	check(flp::spotify_web_url("spotify:user:someone:collection") ==
+			"https://open.spotify.com/collection/tracks",
+		"web URL of Liked Songs");
+	check(flp::spotify_web_url("spotify:user::collection").empty(),
+		"web URL of a collection without a user is empty");
 }
 
 void test_error_policy() {

@@ -4,6 +4,7 @@
 
 #include "component_helpers.h"
 #include "resource.h"
+#include "spotify_links.h"
 #include "spotify_playlists.h"
 
 #include "bridge/process.h"
@@ -13,6 +14,7 @@
 #include <SDK/metadb.h>
 #include <SDK/playlist.h>
 #include <SDK/popup_message.h>
+#include <SDK/ui.h>
 
 #include <algorithm>
 #include <atomic>
@@ -30,10 +32,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <commctrl.h>
+#include <ole2.h>
 #include <windows.h>
 
 namespace flp {
-class spotify_tab_instance;
+class spotify_panel_impl;
 namespace {
 
 const GUID kSpotifyTabGuid = { 0xc8a54f61, 0x2b7d, 0x4e93, { 0x91, 0x0c, 0x5a, 0x6e, 0x24, 0xf8, 0x3b, 0xd7 } };
@@ -43,6 +46,9 @@ constexpr UINT kMsgClearSearch = WM_APP + 2;
 constexpr UINT_PTR kTimerSingleClick = 1;
 constexpr UINT_PTR kTimerRetryLibrary = 2;
 constexpr int kSearchLimit = 25;
+// WM_DPICHANGED is only sent to top-level windows; children get this one
+// (Windows 10 1703+) after the parent moved to a monitor with another DPI.
+constexpr UINT kMsgDpiChangedAfterParent = 0x02E3;
 
 enum class node_kind { section, item, message, loading };
 
@@ -64,6 +70,9 @@ struct tree_node {
 	bool loading = false;
 	uint32_t id = 0;
 	HTREEITEM item = nullptr;
+	// Track nodes from search / artist pages: the full info, so a drag or the
+	// selection carries titles before the track was ever played.
+	std::shared_ptr<const track_info> track;
 };
 
 struct library_snapshot {
@@ -78,8 +87,80 @@ struct async_state {
 	std::atomic<uint64_t> library_generation{ 0 };
 	std::atomic<uint64_t> search_generation{ 0 };
 	std::atomic<uint64_t> open_generation{ 0 };
-	class spotify_tab_instance* owner = nullptr;
+	class spotify_panel_impl* owner = nullptr;
 };
+
+// A cancel token for panel work: stops when the panel goes away or foobar2000
+// quits, and optionally when `superseded` says a newer request replaced it.
+cancel_token panel_token(const std::shared_ptr<async_state>& state,
+	std::function<bool()> superseded = std::function<bool()>()) {
+	cancel_token token;
+	token.is_aborting = [state, superseded] {
+		return !state->alive.load() || app_is_quitting() || (superseded && superseded());
+	};
+	return token;
+}
+
+// The window's DPI; GetDpiForWindow (Windows 10 1607+) follows per-monitor
+// DPI, older systems report the system DPI.
+int window_dpi(HWND wnd) {
+	using get_dpi_t = UINT(WINAPI*)(HWND);
+	static const get_dpi_t getDpi = [] {
+		HMODULE user32 = GetModuleHandleW(L"user32.dll");
+		return user32 == nullptr
+			? nullptr
+			: reinterpret_cast<get_dpi_t>(GetProcAddress(user32, "GetDpiForWindow"));
+	}();
+	if (getDpi != nullptr && wnd != nullptr) {
+		const UINT dpi = getDpi(wnd);
+		if (dpi > 0) return static_cast<int>(dpi);
+	}
+	int dpi = 96;
+	HDC screen = GetDC(wnd);
+	if (screen != nullptr) {
+		const int value = GetDeviceCaps(screen, LOGPIXELSX);
+		if (value > 0) dpi = value;
+		ReleaseDC(wnd, screen);
+	}
+	return dpi;
+}
+
+// Minimal IDropSource for dragging tracks out of the tree.
+class tree_drop_source : public IDropSource {
+public:
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+		if (out == nullptr) return E_POINTER;
+		if (riid == IID_IUnknown || riid == IID_IDropSource) {
+			*out = static_cast<IDropSource*>(this);
+			AddRef();
+			return S_OK;
+		}
+		*out = nullptr;
+		return E_NOINTERFACE;
+	}
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++m_refs; }
+	ULONG STDMETHODCALLTYPE Release() override {
+		const ULONG refs = --m_refs;
+		if (refs == 0) delete this;
+		return refs;
+	}
+	HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL escape, DWORD keys) override {
+		if (escape) return DRAGDROP_S_CANCEL;
+		if ((keys & (MK_LBUTTON | MK_RBUTTON)) == 0) return DRAGDROP_S_DROP;
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+
+private:
+	std::atomic<ULONG> m_refs{ 1 };
+};
+
+// "Copy link": the https form, like the track menu's Copy link. Liked Songs
+// has a fixed web address; anything else falls back to the URI.
+std::string web_link(const std::string& uri) {
+	const std::string url = spotify_web_url(uri);
+	return url.empty() ? uri : url;
+}
 
 std::string trim(const std::string& value) {
 	size_t begin = 0;
@@ -167,11 +248,9 @@ private:
 
 const GUID spotify_tab_guid = kSpotifyTabGuid;
 
-class spotify_tab_instance : public ui_element_instance {
+class spotify_panel_impl : public spotify_panel {
 public:
-	spotify_tab_instance(HWND parent, ui_element_config::ptr config,
-		ui_element_instance_callback::ptr callback)
-		: m_callback(callback), m_config(config) {
+	spotify_panel_impl(HWND parent, spotify_panel_host& host, bool visible) : m_host(host) {
 		m_state = std::make_shared<async_state>();
 		m_state->owner = this;
 
@@ -180,7 +259,7 @@ public:
 			WNDCLASSEXW wc = {};
 			wc.cbSize = sizeof(wc);
 			wc.style = CS_HREDRAW | CS_VREDRAW;
-			wc.lpfnWndProc = &spotify_tab_instance::window_proc;
+			wc.lpfnWndProc = &spotify_panel_impl::window_proc;
 			wc.hInstance = core_api::get_my_instance();
 			wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
 			wc.lpszClassName = L"foo_librespot.spotify_tab";
@@ -188,13 +267,15 @@ public:
 		}
 		if (windowClass == 0) throw exception_win32(GetLastError());
 
-		m_wnd = CreateWindowExW(0, L"foo_librespot.spotify_tab", L"Spotify",
-			WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 320, 240, parent, nullptr,
-			core_api::get_my_instance(), this);
+		// WS_EX_CONTROLPARENT: hosts that do dialog-style Tab handling include
+		// the search box, Refresh and the tree.
+		m_wnd = CreateWindowExW(WS_EX_CONTROLPARENT, L"foo_librespot.spotify_tab", L"Spotify",
+			WS_CHILD | WS_CLIPCHILDREN | (visible ? WS_VISIBLE : 0), 0, 0, 320, 240, parent,
+			nullptr, core_api::get_my_instance(), this);
 		if (m_wnd == nullptr) throw exception_win32(GetLastError());
 	}
 
-	~spotify_tab_instance() {
+	~spotify_panel_impl() override {
 		m_state->alive = false;
 		m_state->owner = nullptr;
 		if (m_wnd != nullptr && IsWindow(m_wnd)) DestroyWindow(m_wnd);
@@ -204,35 +285,25 @@ public:
 		}
 	}
 
-	HWND get_wnd() override { return m_wnd; }
+	HWND get_wnd() const override { return m_wnd; }
 
-	void set_configuration(ui_element_config::ptr config) override { m_config = config; }
-	ui_element_config::ptr get_configuration() override {
-		return m_config.is_valid() ? m_config : ui_element_config::g_create_empty(kSpotifyTabGuid);
-	}
-	GUID get_guid() override { return kSpotifyTabGuid; }
-	GUID get_subclass() override { return ui_element_subclass_media_library_viewers; }
-	double get_focus_priority() override { return 1.0; }
 	void set_default_focus() override {
 		if (m_search != nullptr) SetFocus(m_search);
-		else set_default_focus_fallback();
 	}
 
-	void notify(const GUID& what, t_size, const void*, t_size) override {
-		if (what == ui_element_notify_colors_changed || what == ui_element_notify_font_changed) {
-			apply_colors();
-			apply_fonts();
-			InvalidateRect(m_wnd, nullptr, TRUE);
-		}
+	void on_style_changed() override {
+		apply_colors();
+		apply_fonts();
+		if (m_wnd != nullptr) InvalidateRect(m_wnd, nullptr, TRUE);
 	}
 
 private:
 	static LRESULT CALLBACK window_proc(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam) {
-		auto* self = reinterpret_cast<spotify_tab_instance*>(
+		auto* self = reinterpret_cast<spotify_panel_impl*>(
 			GetWindowLongPtrW(wnd, GWLP_USERDATA));
 		if (message == WM_NCCREATE) {
 			auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
-			self = reinterpret_cast<spotify_tab_instance*>(create->lpCreateParams);
+			self = reinterpret_cast<spotify_panel_impl*>(create->lpCreateParams);
 			SetWindowLongPtrW(wnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
 			if (self != nullptr) self->m_wnd = wnd;
 		}
@@ -249,9 +320,25 @@ private:
 				return -1;
 			}
 			return 0;
-		case WM_SIZE:
+		case WM_SIZE: {
+			// Catches a DPI change on hosts that do not forward
+			// WM_DPICHANGED_AFTERPARENT.
+			const int dpi = window_dpi(m_wnd);
+			if (dpi != m_dpi) m_dpi = dpi;
 			layout();
 			return 0;
+		}
+		case kMsgDpiChangedAfterParent:
+			m_dpi = window_dpi(m_wnd);
+			layout();
+			InvalidateRect(m_wnd, nullptr, TRUE);
+			return 0;
+		case WM_CONTEXTMENU:
+			if (reinterpret_cast<HWND>(wparam) == m_tree) {
+				on_tree_context_menu(lparam);
+				return 0;
+			}
+			break;
 		case WM_ERASEBKGND: {
 			RECT rect;
 			GetClientRect(m_wnd, &rect);
@@ -333,6 +420,7 @@ private:
 			}
 			KillTimer(wnd, kTimerSingleClick);
 			KillTimer(wnd, kTimerRetryLibrary);
+			m_selection.release();
 			SetWindowLongPtrW(wnd, GWLP_USERDATA, 0);
 			m_wnd = nullptr;
 			return DefWindowProcW(wnd, message, wparam, lparam);
@@ -349,13 +437,7 @@ private:
 		commonControls.dwICC = ICC_TREEVIEW_CLASSES;
 		InitCommonControlsEx(&commonControls);
 
-		m_dpi = 96;
-		HDC screen = GetDC(m_wnd);
-		if (screen != nullptr) {
-			const int dpi = GetDeviceCaps(screen, LOGPIXELSX);
-			if (dpi > 0) m_dpi = dpi;
-			ReleaseDC(m_wnd, screen);
-		}
+		m_dpi = window_dpi(m_wnd);
 
 		m_search = CreateWindowExW(0, L"EDIT", L"",
 			WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
@@ -363,7 +445,7 @@ private:
 			core_api::get_my_instance(), nullptr);
 		SendMessageW(m_search, EM_SETCUEBANNER, TRUE,
 			reinterpret_cast<LPARAM>(L"Search Spotify \x2014 press Enter"));
-		SetWindowSubclass(m_search, &spotify_tab_instance::search_subclass, 1,
+		SetWindowSubclass(m_search, &spotify_panel_impl::search_subclass, 1,
 			reinterpret_cast<DWORD_PTR>(this));
 
 		m_refresh = CreateWindowExW(0, L"BUTTON", L"Refresh",
@@ -386,6 +468,12 @@ private:
 			m_status == nullptr) {
 			throw exception_win32(GetLastError());
 		}
+		// Tab / Shift+Tab move between the search box, Refresh and the tree
+		// even when the host does no dialog-style keyboard handling.
+		SetWindowSubclass(m_refresh, &spotify_panel_impl::tab_subclass, 2,
+			reinterpret_cast<DWORD_PTR>(this));
+		SetWindowSubclass(m_tree, &spotify_panel_impl::tab_subclass, 2,
+			reinterpret_cast<DWORD_PTR>(this));
 
 		m_dark.AddControls(m_wnd);
 
@@ -398,7 +486,8 @@ private:
 
 	static LRESULT CALLBACK search_subclass(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam,
 		UINT_PTR, DWORD_PTR reference) {
-		auto* self = reinterpret_cast<spotify_tab_instance*>(reference);
+		auto* self = reinterpret_cast<spotify_panel_impl*>(reference);
+		if (self != nullptr && self->handle_tab_key(wnd, message, wparam)) return 0;
 		if (message == WM_KEYDOWN && self != nullptr) {
 			if (wparam == VK_RETURN) {
 				PostMessageW(self->m_wnd, kMsgRunSearch, 0, 0);
@@ -410,6 +499,32 @@ private:
 			}
 		}
 		return DefSubclassProc(wnd, message, wparam, lparam);
+	}
+
+	static LRESULT CALLBACK tab_subclass(HWND wnd, UINT message, WPARAM wparam, LPARAM lparam,
+		UINT_PTR, DWORD_PTR reference) {
+		auto* self = reinterpret_cast<spotify_panel_impl*>(reference);
+		if (self != nullptr && self->handle_tab_key(wnd, message, wparam)) return 0;
+		if (message == WM_NCDESTROY) {
+			RemoveWindowSubclass(wnd, &spotify_panel_impl::tab_subclass, 2);
+		}
+		return DefSubclassProc(wnd, message, wparam, lparam);
+	}
+
+	// Tab cycles search box -> Refresh -> tree (Shift+Tab backwards).
+	bool handle_tab_key(HWND wnd, UINT message, WPARAM wparam) {
+		if (message == WM_CHAR && wparam == L'\t') return true; // no beep
+		if (message != WM_KEYDOWN || wparam != VK_TAB) return false;
+		if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) return false;
+		const bool back = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+		const HWND order[] = { m_search, m_refresh, m_tree };
+		size_t at = 0;
+		for (size_t i = 0; i < 3; ++i) {
+			if (order[i] == wnd) at = i;
+		}
+		const HWND next = order[(at + (back ? 2 : 1)) % 3];
+		if (next != nullptr) SetFocus(next);
+		return true;
 	}
 
 	int scaled(int value) const { return MulDiv(value, m_dpi, 96); }
@@ -437,11 +552,12 @@ private:
 	}
 
 	void apply_fonts() {
-		const t_ui_font listFont = m_callback->query_font_ex(ui_font_lists);
+		if (m_tree == nullptr) return;
+		const HFONT listFont = m_host.panel_list_font();
 		if (listFont != nullptr) {
 			SendMessageW(m_tree, WM_SETFONT, reinterpret_cast<WPARAM>(listFont), TRUE);
 		}
-		const t_ui_font defaultFont = m_callback->query_font_ex(ui_font_default);
+		const HFONT defaultFont = m_host.panel_default_font();
 		if (defaultFont != nullptr) {
 			SendMessageW(m_search, WM_SETFONT, reinterpret_cast<WPARAM>(defaultFont), TRUE);
 			SendMessageW(m_refresh, WM_SETFONT, reinterpret_cast<WPARAM>(defaultFont), TRUE);
@@ -449,17 +565,17 @@ private:
 		}
 	}
 
-	bool dark_mode() const { return m_callback->is_dark_mode(); }
+	bool dark_mode() const { return m_host.panel_dark_mode(); }
 
 	COLORREF background_color() const {
-		t_ui_color color = 0;
-		if (m_callback->query_color(ui_color_background, color)) return color;
+		COLORREF color = 0;
+		if (m_host.panel_background(color)) return color;
 		return dark_mode() ? RGB(32, 32, 32) : GetSysColor(COLOR_WINDOW);
 	}
 
 	COLORREF text_color() const {
-		t_ui_color color = 0;
-		if (m_callback->query_color(ui_color_text, color)) return color;
+		COLORREF color = 0;
+		if (m_host.panel_text(color)) return color;
 		return dark_mode() ? RGB(240, 240, 240) : GetSysColor(COLOR_WINDOWTEXT);
 	}
 
@@ -655,7 +771,8 @@ private:
 		return node;
 	}
 
-	void add_item_node(HTREEITEM parent, const library_item& item, bool likely_followed = false) {
+	tree_node* add_item_node(HTREEITEM parent, const library_item& item,
+		bool likely_followed = false) {
 		std::string text = item.name;
 		if (!item.subtitle.empty()) text += " \xE2\x80\x94 " + item.subtitle;
 		const bool expandable = item.kind == "artist";
@@ -663,6 +780,17 @@ private:
 			expandable);
 		node->likely_followed = likely_followed;
 		node->editable = item.editable;
+		return node;
+	}
+
+	void add_track_node(HTREEITEM parent, const track_info& track) {
+		library_item item;
+		item.uri = track.uri;
+		item.kind = "track";
+		item.name = track.title;
+		item.subtitle = artists_text(track);
+		tree_node* node = add_item_node(parent, item);
+		node->track = std::make_shared<const track_info>(track);
 	}
 
 	const library_section* find_section(const char* id) const {
@@ -688,12 +816,7 @@ private:
 			tree_node* group = add_node(root->item, node_kind::section, "Tracks", std::string(),
 				std::string(), std::string(), true);
 			for (const track_info& track : m_searchResults.tracks) {
-				library_item item;
-				item.uri = track.uri;
-				item.kind = "track";
-				item.name = track.title;
-				item.subtitle = artists_text(track);
-				add_item_node(group->item, item);
+				add_track_node(group->item, track);
 			}
 			any = true;
 		}
@@ -734,10 +857,8 @@ private:
 		rebuild_tree();
 
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state, generation] {
-			return !state->alive.load() || state->library_generation.load() != generation;
-		};
+		const cancel_token cancel = panel_token(state,
+			[state, generation] { return state->library_generation.load() != generation; });
 
 		fb2k::splitTask([state, generation, cancel] {
 			library_snapshot snapshot;
@@ -827,10 +948,8 @@ private:
 		const uint64_t generation = ++m_state->search_generation;
 		set_status("Searching for \xE2\x80\x9C" + query + "\xE2\x80\x9D\xE2\x80\xA6");
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state, generation] {
-			return !state->alive.load() || state->search_generation.load() != generation;
-		};
+		const cancel_token cancel = panel_token(state,
+			[state, generation] { return state->search_generation.load() != generation; });
 
 		fb2k::splitTask([state, generation, query, cancel] {
 			search_result result;
@@ -882,10 +1001,8 @@ private:
 			(force ? " (sync)" : "") + "\xE2\x80\xA6");
 
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state, generation] {
-			return !state->alive.load() || state->open_generation.load() != generation;
-		};
+		const cancel_token cancel = panel_token(state,
+			[state, generation] { return state->open_generation.load() != generation; });
 
 		open_context_async(uri, name, play, force,
 			[state, generation](bool ok, const std::string& message, t_size playlist) {
@@ -915,8 +1032,7 @@ private:
 		if (uri.empty()) return;
 		set_status("Adding " + name + " to the active playlist\xE2\x80\xA6");
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 		add_context_to_active_async(
 			uri,
 			[state](bool ok, const std::string& message, t_size) {
@@ -933,8 +1049,7 @@ private:
 		if (uri.empty()) return;
 		set_status("Adding " + name + " to the playback queue\xE2\x80\xA6");
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 		fb2k::splitTask([state, uri, cancel] {
 			resolve_result resolved;
 			std::string error;
@@ -998,13 +1113,14 @@ private:
 		if (uri.empty() || m_follow_inflight.count(uri) != 0) return;
 		m_follow_inflight.insert(uri);
 		const std::shared_ptr<async_state> state = m_state;
-		fb2k::splitTask([state, uri] {
+		const cancel_token cancel = panel_token(state);
+		fb2k::splitTask([state, uri, cancel] {
 			bool following = false;
 			bool ok = false;
 			try {
 				ensure_bridge_started(fb2k::mainAborter());
 				bridge_client client;
-				const std::vector<bool> flags = client.following({ uri }, cancel_token(), 2000, 8000);
+				const std::vector<bool> flags = client.following({ uri }, cancel, 2000, 8000);
 				if (!flags.empty()) {
 					following = flags.front();
 					ok = true;
@@ -1031,8 +1147,7 @@ private:
 		set_status("Updating your Spotify library\xE2\x80\xA6");
 
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 		fb2k::splitTask([state, uri, cancel, follow, done] {
 			std::string error;
 			try {
@@ -1067,8 +1182,7 @@ private:
 		set_status("Creating the playlist\xE2\x80\xA6");
 
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 		fb2k::splitTask([state, name, cancel] {
 			std::string error;
 			std::string created = name;
@@ -1103,8 +1217,7 @@ private:
 		set_status("Renaming the playlist\xE2\x80\xA6");
 
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 		fb2k::splitTask([state, uri, name, cancel] {
 			std::string error;
 			try {
@@ -1144,8 +1257,7 @@ private:
 
 		set_status("Removing the playlist\xE2\x80\xA6");
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 		fb2k::splitTask([state, uri, cancel] {
 			std::string error;
 			try {
@@ -1212,8 +1324,7 @@ private:
 		const uint32_t id = node->id;
 		const std::string uri = node->uri;
 		const std::shared_ptr<async_state> state = m_state;
-		cancel_token cancel;
-		cancel.is_aborting = [state] { return !state->alive.load(); };
+		const cancel_token cancel = panel_token(state);
 
 		fb2k::splitTask([state, id, uri, cancel] {
 			artist_result result;
@@ -1254,12 +1365,7 @@ private:
 			tree_node* topNode = add_node(node->item, node_kind::section, "Top tracks",
 				std::string(), std::string(), std::string(), true);
 			for (const track_info& track : result.top_tracks) {
-				library_item item;
-				item.uri = track.uri;
-				item.kind = "track";
-				item.name = track.title;
-				item.subtitle = artists_text(track);
-				add_item_node(topNode->item, item);
+				add_track_node(topNode->item, track);
 			}
 			TreeView_Expand(m_tree, topNode->item, TVE_EXPAND);
 		}
@@ -1303,6 +1409,19 @@ private:
 			return on_tree_click(true);
 		case NM_RCLICK:
 			return on_tree_right_click();
+		case NM_SETFOCUS:
+			acquire_selection();
+			return 0;
+		case TVN_SELCHANGEDW: {
+			auto* info = reinterpret_cast<NMTREEVIEWW*>(header);
+			publish_selection(node_from_pointer(info->itemNew.lParam));
+			return 0;
+		}
+		case TVN_BEGINDRAGW: {
+			auto* info = reinterpret_cast<NMTREEVIEWW*>(header);
+			begin_drag(node_from_pointer(info->itemNew.lParam));
+			return 0;
+		}
 		case TVN_ITEMEXPANDINGW: {
 			auto* info = reinterpret_cast<NMTREEVIEWW*>(header);
 			if (info->action == TVE_EXPAND) {
@@ -1395,15 +1514,93 @@ private:
 		return followed ? L"Unfollow" : L"Follow";
 	}
 
+	// ---- selection and drag ---------------------------------------------
+
+	// Handles for a track node, with its info preloaded when known. Albums,
+	// playlists and artists would need resolving first, so they give none.
+	metadb_handle_list node_handles(const tree_node* node) const {
+		metadb_handle_list handles;
+		if (node == nullptr || node->kind != node_kind::item || node->item_kind != "track") {
+			return handles;
+		}
+		const std::string path = node->track ? track_path(*node->track) : node->uri;
+		if (!is_spotify_track_uri(path)) return handles;
+		metadb_handle_ptr handle = metadb::get()->handle_create(path.c_str(), 0);
+		if (handle.is_empty()) return handles;
+		if (node->track) {
+			metadb_hint_list_v3::ptr hints = metadb_hint_list_v3::create();
+			file_info_impl info;
+			fill_file_info(*node->track, info);
+			hints->add_hint_forced(handle, info, t_filestats(), false);
+			hints->on_done();
+		}
+		handles.add_item(handle);
+		return handles;
+	}
+
+	// The tree took the focus: it now owns foobar2000's "current selection"
+	// (Properties, the context menu, the selection-following components).
+	void acquire_selection() {
+		if (m_selection.is_empty()) m_selection = ui_selection_manager::get()->acquire();
+		publish_selection(selected_node());
+	}
+
+	void publish_selection(const tree_node* node) {
+		if (m_selection.is_empty()) return;
+		m_selection->set_selection(node_handles(node));
+	}
+
+	void begin_drag(const tree_node* node) {
+		KillTimer(m_wnd, kTimerSingleClick);
+		m_pending_click = 0;
+		const metadb_handle_list handles = node_handles(node);
+		if (handles.get_count() == 0) return;
+		pfc::com_ptr_t<IDataObject> data =
+			playlist_incoming_item_filter::get()->create_dataobject_ex(handles);
+		if (data.is_empty()) return;
+		IDropSource* source = new tree_drop_source();
+		DWORD effect = DROPEFFECT_NONE;
+		DoDragDrop(data.get_ptr(), source, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK,
+			&effect);
+		source->Release();
+	}
+
+	// ---- context menu ---------------------------------------------------
+
 	LRESULT on_tree_right_click() {
 		KillTimer(m_wnd, kTimerSingleClick);
 		m_pending_click = 0;
 		tree_node* node = node_at_cursor();
-		if (node == nullptr) return 0;
+		if (node == nullptr) return 0; // the tree sends WM_CONTEXTMENU instead
+		POINT point = {};
+		GetCursorPos(&point);
+		show_context_menu(node, point);
+		return 1; // handled: no WM_CONTEXTMENU on top
+	}
+
+	// WM_CONTEXTMENU from the tree: the Apps key and Shift+F10 (lparam -1)
+	// open the menu for the selected item, below it.
+	void on_tree_context_menu(LPARAM lparam) {
+		if (lparam != static_cast<LPARAM>(-1)) return; // mouse: NM_RCLICK handled it
+		tree_node* node = selected_node();
+		if (node == nullptr) return;
+		RECT rect = {};
+		POINT point = {};
+		if (TreeView_GetItemRect(m_tree, node->item, &rect, TRUE)) {
+			point.x = rect.left;
+			point.y = rect.bottom;
+		}
+		ClientToScreen(m_tree, &point);
+		show_context_menu(node, point);
+	}
+
+	void show_context_menu(tree_node* node, POINT point) {
+		KillTimer(m_wnd, kTimerSingleClick);
+		m_pending_click = 0;
 		const bool openable = is_openable_item(*node);
 		const bool playlistSection =
 			node->kind == node_kind::section && node->section_id == "playlists";
-		if (!openable && !playlistSection) return 0;
+		if (!openable && !playlistSection) return;
 		TreeView_SelectItem(m_tree, node->item);
 
 		const std::string uri = node->uri;
@@ -1426,7 +1623,7 @@ private:
 		}
 
 		HMENU menu = CreatePopupMenu();
-		if (menu == nullptr) return 0;
+		if (menu == nullptr) return;
 		if (openable) {
 			AppendMenuW(menu, MF_STRING, kMenuOpen, L"Open");
 			AppendMenuW(menu, MF_STRING, kMenuPlay, L"Open and play");
@@ -1434,7 +1631,8 @@ private:
 			if (kind_queues_tracks(kind)) {
 				AppendMenuW(menu, MF_STRING, kMenuQueue, L"Add to playback queue");
 			}
-			AppendMenuW(menu, MF_STRING, kMenuSync, L"Sync now");
+			// Tracks open into the browse playlist, which is never synced.
+			if (kind != "track") AppendMenuW(menu, MF_STRING, kMenuSync, L"Sync now");
 		}
 		if (followable || editablePlaylist || playlistSection) {
 			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1455,8 +1653,6 @@ private:
 			SetMenuDefaultItem(menu, kMenuOpen, FALSE);
 		}
 
-		POINT point = {};
-		GetCursorPos(&point);
 		const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x,
 			point.y, 0, m_wnd, nullptr);
 		DestroyMenu(menu);
@@ -1471,10 +1667,9 @@ private:
 		case kMenuRename: rename_playlist(uri, name); break;
 		case kMenuDelete: delete_playlist(uri, name); break;
 		case kMenuNewPlaylist: new_playlist(); break;
-		case kMenuCopy: copy_to_clipboard(uri); break;
+		case kMenuCopy: copy_to_clipboard(web_link(uri)); break;
 		default: break;
 		}
-		return 0;
 	}
 
 	void copy_to_clipboard(const std::string& text) {
@@ -1501,9 +1696,9 @@ private:
 	static constexpr int kTreeId = 3003;
 	static constexpr int kStatusId = 3004;
 
-	ui_element_instance_callback::ptr m_callback;
-	ui_element_config::ptr m_config;
+	spotify_panel_host& m_host;
 	std::shared_ptr<async_state> m_state;
+	ui_selection_holder::ptr m_selection;
 
 	HWND m_wnd = nullptr;
 	HWND m_search = nullptr;
@@ -1539,7 +1734,63 @@ private:
 	std::string m_search_error;
 };
 
+std::unique_ptr<spotify_panel> create_spotify_panel(HWND parent, spotify_panel_host& host,
+	bool visible) {
+	return std::make_unique<spotify_panel_impl>(parent, host, visible);
+}
+
 namespace {
+
+// Default UI element: the panel plus colours/fonts from the DUI callback.
+class spotify_tab_instance : public ui_element_instance, private spotify_panel_host {
+public:
+	spotify_tab_instance(HWND parent, ui_element_config::ptr config,
+		ui_element_instance_callback::ptr callback)
+		: m_callback(callback), m_config(config) {
+		m_panel = create_spotify_panel(parent, *this, true);
+	}
+
+	HWND get_wnd() override { return m_panel ? m_panel->get_wnd() : nullptr; }
+
+	void set_configuration(ui_element_config::ptr config) override { m_config = config; }
+	ui_element_config::ptr get_configuration() override {
+		return m_config.is_valid() ? m_config : ui_element_config::g_create_empty(kSpotifyTabGuid);
+	}
+	GUID get_guid() override { return kSpotifyTabGuid; }
+	GUID get_subclass() override { return ui_element_subclass_media_library_viewers; }
+	double get_focus_priority() override { return 1.0; }
+	void set_default_focus() override {
+		if (m_panel) m_panel->set_default_focus();
+	}
+
+	void notify(const GUID& what, t_size, const void*, t_size) override {
+		if (what == ui_element_notify_colors_changed || what == ui_element_notify_font_changed) {
+			if (m_panel) m_panel->on_style_changed();
+		}
+	}
+
+private:
+	bool panel_dark_mode() override { return m_callback->is_dark_mode(); }
+	bool panel_background(COLORREF& out) override {
+		t_ui_color color = 0;
+		if (!m_callback->query_color(ui_color_background, color)) return false;
+		out = color;
+		return true;
+	}
+	bool panel_text(COLORREF& out) override {
+		t_ui_color color = 0;
+		if (!m_callback->query_color(ui_color_text, color)) return false;
+		out = color;
+		return true;
+	}
+	HFONT panel_list_font() override { return m_callback->query_font_ex(ui_font_lists); }
+	HFONT panel_default_font() override { return m_callback->query_font_ex(ui_font_default); }
+
+	ui_element_instance_callback::ptr m_callback;
+	ui_element_config::ptr m_config;
+	// Last: destroyed (window first) before the callback it uses.
+	std::unique_ptr<spotify_panel> m_panel;
+};
 
 class spotify_tab_element : public ui_element {
 public:

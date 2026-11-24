@@ -114,6 +114,14 @@ spotify_link parse_spotify_link(const std::string& input) {
 }
 
 std::string spotify_web_url(const std::string& uri) {
+	// Liked Songs: spotify:user:<name>:collection has one fixed web address.
+	const std::string text = trim(uri);
+	if (text.compare(0, 13, "spotify:user:") == 0) {
+		const std::vector<std::string> parts = split(text.substr(8), ':');
+		if (parts.size() == 3 && !parts[1].empty() && parts[2] == "collection") {
+			return "https://open.spotify.com/collection/tracks";
+		}
+	}
 	const spotify_link link = parse_spotify_link(uri);
 	if (!link) return std::string();
 	return std::string("https://open.spotify.com/") + kind_word(link.kind) + "/" + link.id;

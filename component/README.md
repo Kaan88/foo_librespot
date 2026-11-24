@@ -23,7 +23,11 @@ foobar2000 v2 component that plays Spotify tracks by talking to the
 
 **Add New UI Element...** lists it as **Spotify** (Media Library viewers), so
 it can be dropped into a Default UI tab stack next to Playlists / Properties /
-ReFacets. It is a plain Win32 TreeView (comctl32); no ATL/WTL is required.
+ReFacets. In Columns UI it is listed under **Panels > Spotify**
+(`src/spotify_tab_cui.cpp`, a `uie::window`). Both hosts wrap the same panel
+code (`create_spotify_panel()` in `src/spotify_tab.cpp`); the host only
+supplies colours, fonts and the dark mode flag. It is a plain Win32 TreeView
+(comctl32); no ATL/WTL is required.
 
 - **Your library**: Liked Songs, Albums (saved), Artists (followed; expand an
   artist to load its albums and singles through the bridge `artist` op).
@@ -37,8 +41,19 @@ ReFacets. It is a plain Win32 TreeView (comctl32); no ATL/WTL is required.
   play / Add to current playlist / Add to playback queue / Sync now, then
   Follow or Unfollow (albums: Save to Your Library / Remove from Your Library),
   Rename... and Delete... for the user's own playlists, New playlist... on the
-  Your playlists node, and Copy link. Top tracks / Top artists sections appear
-  when a bridge fills them; today's bridge reports them empty.
+  Your playlists node, and Copy link (the `https://open.spotify.com` URL; Liked
+  Songs gives `.../collection/tracks`). Top tracks / Top artists sections
+  appear when a bridge fills them; today's bridge reports them empty.
+- Tracks (search results, artist top tracks) open into the browse playlist
+  (see below), can be dragged onto a playlist
+  (`playlist_incoming_item_filter::create_dataobject_ex`), and become
+  foobar2000's current selection (`ui_selection_holder`) while the tree has
+  the focus, for Properties and other selection viewers. Albums, playlists
+  and artists would have to be resolved first, so they are not draggable.
+- Keyboard: Tab / Shift+Tab cycle search box, Refresh and tree; the Apps key
+  and Shift+F10 open the item menu under the selected item.
+- Per-monitor DPI: the layout is rescaled on `WM_DPICHANGED_AFTERPARENT` (and
+  rechecked on `WM_SIZE`) when the window moves to another monitor.
 - The search, tree loads and every bridge call run on worker threads
   (`fb2k::splitTask`), and results return through `fb2k::inMainThread`; the UI
   never blocks. Loading, connecting, not-logged-in and error states are shown
@@ -49,10 +64,13 @@ Dark mode: the element uses `ui_config_manager`/`is_dark_mode()`,
 `fb2k::coreDarkMode` hooks (`AddControls`) for the TreeView, edit box and
 button, following the SDK's UI Element and DarkMode helpers.
 
-Columns UI is **not** built: its SDK is not vendored in this repository, and
-adding the panel would require downloading a second SDK and its WTL/ATL
-dependencies. The Default UI element covers the tabbed layout described in the
-roadmap.
+Columns UI: colours come from Columns UI's global colours
+(`cui::colours::helper`), fonts from its common items / labels fonts
+(`cui::fonts::manager`), and changes arrive through the common callbacks.
+The Columns UI SDK (v8.1.0, no WTL needed) is downloaded by
+`scripts/fetch_cui_sdk.ps1` into `third_party/foobar2000_sdk/columns_ui-sdk`
+(it includes `../pfc` and `../foobar2000`, so it sits next to them) and is
+built as a project reference. `build.ps1` calls it after `fetch_sdk.ps1`.
 
 ## Synced playlists
 
@@ -60,8 +78,24 @@ Opening a playlist, album, Liked Songs or a search track from the tab creates
 (or reuses) a normal foobar2000 playlist named `<prefix><name>` (default
 `Spotify · `) and links it to the Spotify context URI through the persistent
 playlist property **`foo_librespot.context`** (a GUID property; the value is
-the URI), so renaming the playlist does not break it. A second property stores
-the last applied revision.
+the URI), so renaming the playlist does not break it. Further properties store
+the last applied revision, the Spotify name and the library revision.
+
+- **Lock**: every synced playlist carries a `playlist_lock` ("Synced with
+  Spotify") that refuses adding, removing, reordering and replacing items,
+  with a short popup that points to Detach and to Remove from Spotify
+  playlist. Renaming and deleting the playlist stay allowed. The component's
+  own sync and Remove from Spotify playlist pass the lock through the RAII
+  guard `flp::synced_playlist_edit` (`spotify_playlists.h`). Locks are
+  installed at startup and dropped on Detach. A playlist that already has
+  another component's lock is left unlocked.
+- **Browse playlist**: tracks (search results, artist top tracks), artist top
+  tracks and radio from the Spotify submenu all reuse one `<prefix>Browse`
+  playlist (property value `foo_librespot:browse`). It is not synced or
+  locked.
+- **Rename**: when Spotify reports a new name, the foobar2000 playlist is
+  renamed to `<prefix><new name>`, but only if it still has the name the
+  component gave it (a user rename is kept).
 
 - Sync resolves the context again. If the bridge's `context.revision` matches
   the stored one, nothing is written. Otherwise a minimal diff is applied:
@@ -75,9 +109,14 @@ the last applied revision.
   their items.
 - Triggers: opening from the tab, the timer (Preferences, default 30 minutes,
   "Off" = 0), **Library > Sync Spotify playlists**, and **Sync now** in the tab.
-- Detach: **Edit > Detach from Spotify** for the active playlist, or right-click
-  a playlist (tab/Playlist Manager) and choose **Detach from Spotify**. The
-  playlist is kept, only the link is removed.
+  The timer first makes one `library` call and skips resolving playlists whose
+  library revision is unchanged since the last sync. Made-for-you playlists
+  report no revision and are always resolved. Manual syncs always resolve.
+- Detach: **Edit > Detach from Spotify** for the active playlist (greyed out
+  when it is not synced), or right-click a playlist (tab/Playlist Manager) and
+  choose **Detach from Spotify** (hidden for playlists that are not synced).
+  From the Playlist Manager it acts on the right-clicked playlist. The
+  playlist is kept, and the link and the lock are removed.
 - Removing tracks: select them in the foobar2000 copy of a synced Spotify
   playlist and choose **Remove from Spotify playlist** (Spotify submenu). The
   component sends each track's URI and its position in the foobar2000
@@ -129,7 +168,8 @@ cd component
 
 `build.ps1` locates Visual Studio with `vswhere`, picks the installed platform
 toolset (v145 for MSVC 14.5x) and passes it to MSBuild as
-`/p:PlatformToolset=...`. The SDK's project files are not edited.
+`/p:PlatformToolset=...`. The SDK's project files are not edited. It runs
+`fetch_sdk.ps1` and `fetch_cui_sdk.ps1` first (both skip when present).
 
 Products:
 
@@ -285,10 +325,12 @@ to foobar2000 as dynamic info once playback starts, so album gain mode follows.
 ```
 src/main.cpp               component identity
 src/input_spotify.cpp      input_entry + decoder (float32 PCM, seek by reopen)
-src/add_link.cpp           File > Add Spotify link... + dialog
+src/add_link.cpp           File > Add Spotify link... + dialog (threaded_process)
 src/preferences.cpp        Tools > foo_librespot preferences page
-src/spotify_tab.*          Spotify Default UI element (search + library tree)
-src/spotify_playlists.*    context property, create/reuse, minimal-diff sync
+src/spotify_tab.*          Spotify panel (search + library tree) + Default UI element
+src/spotify_tab_cui.cpp    Columns UI panel host (uie::window)
+src/spotify_playlists.*    context property, create/reuse, minimal-diff sync, lock
+src/app_cancel_shim.*      temporary app-wide cancel token (until merged)
 src/sync_plan.*            pure diff algorithm (unit-tested)
 src/spotify_commands.cpp   sync-all menu, detach menu/context item, sync timer
 src/album_art_spotify.cpp  cover_front extractor (http_client download)
@@ -299,7 +341,7 @@ src/bridge/protocol.*      PROTOCOL.md v1 + v2 client
 src/bridge/process.*       librespot-bridge.exe lifetime management
 src/foo_librespot.rc       dialogs + version resource
 tools/                     fake bridges, console harnesses, metadata/sync tests
-scripts/                   fetch_sdk / build / test / package
+scripts/                   fetch_sdk / fetch_cui_sdk / build / test / package
 ```
 
 ## Notes / limitations
@@ -331,4 +373,6 @@ scripts/                   fetch_sdk / build / test / package
   foobar2000 APIs that cannot run outside the host; they are built for
   x64 and the protocol layer/diff are covered by the tests above, but the
   in-app UI still needs a real foobar2000 run to be verified visually.
-- Columns UI is not supported (see "Spotify tab").
+- Columns UI dark mode: the panel follows Columns UI's dark mode flag for
+  its colours. Scroll bars and the edit box use foobar2000's core dark mode
+  hooks, so they can differ if the two settings disagree.
