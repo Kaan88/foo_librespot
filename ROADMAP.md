@@ -56,6 +56,18 @@ A foobar2000 component that plays Spotify through foobar2000's own pipeline (out
 - ✅ Audio cache size setting (preferences: Off..10 GB, default 1 GB, Clear cache; `--cache-mb` at spawn, `config` op live). Verified in foobar2000 x64 (2026-11-23).
 - ✅ Clearer errors: `premium_required`, `rate_limited`, `region_unavailable`, `track_unavailable`; popup once per kind; unavailable tracks are skipped. Verified in foobar2000 x64 (2026-11-23).
 - ✅ Album ReplayGain values (AUDIO_FILES `default_album_normalization_params`, also from the open header as dynamic info).
+- ✅ Panel and playlist polish (not yet verified in foobar2000):
+  - Columns UI panel.
+  - Drag tracks out of the panel; the panel provides foobar2000's current selection.
+  - One reusable browse playlist.
+  - Synced playlists are locked.
+  - Spotify renames are followed.
+  - The sync timer checks revisions before resolving.
+  - Add link runs in a cancellable background task.
+  - Detach targets the right playlist.
+  - Keyboard: Tab, Apps key / Shift+F10.
+  - Copy link gives an https link.
+  - Per-monitor DPI.
 - Spotify Connect: control foobar2000 from the phone (largest item, last).
 
 ## Known issues / fix notes
