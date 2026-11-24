@@ -46,6 +46,8 @@ constexpr UINT kMsgClearSearch = WM_APP + 2;
 constexpr UINT_PTR kTimerSingleClick = 1;
 constexpr UINT_PTR kTimerRetryLibrary = 2;
 constexpr int kSearchLimit = 25;
+constexpr const char* kLibraryHint =
+	"Click an item to open it; double-click to play. Right-click for more.";
 // WM_DPICHANGED is only sent to top-level windows; children get this one
 // (Windows 10 1703+) after the parent moved to a monitor with another DPI.
 constexpr UINT kMsgDpiChangedAfterParent = 0x02E3;
@@ -411,6 +413,9 @@ private:
 				m_searchResults = search_result();
 				rebuild_tree();
 			}
+			// Drop "Search results for ..." or "Searching ..." with the results.
+			if (!m_library_error.empty()) set_status(m_library_error);
+			else if (!m_library_loading) set_status(kLibraryHint);
 			return 0;
 		case WM_NCDESTROY: {
 			HWND wnd = m_wnd;
@@ -488,6 +493,19 @@ private:
 		UINT_PTR, DWORD_PTR reference) {
 		auto* self = reinterpret_cast<spotify_panel_impl*>(reference);
 		if (self != nullptr && self->handle_tab_key(wnd, message, wparam)) return 0;
+		if (message == WM_GETDLGCODE) {
+			// A host that runs IsDialogMessage (Default UI containers, custom UIs)
+			// otherwise eats Enter and Escape as dialog keys before they reach the
+			// box, and the search never runs.
+			LRESULT code = DefSubclassProc(wnd, message, wparam, lparam);
+			const auto* msg = reinterpret_cast<const MSG*>(lparam);
+			if (msg != nullptr && msg->message == WM_KEYDOWN &&
+				(msg->wParam == VK_RETURN || msg->wParam == VK_ESCAPE)) {
+				code |= DLGC_WANTMESSAGE;
+			}
+			return code;
+		}
+		if (message == WM_CHAR && (wparam == L'\r' || wparam == 0x1B)) return 0; // no beep
 		if (message == WM_KEYDOWN && self != nullptr) {
 			if (wparam == VK_RETURN) {
 				PostMessageW(self->m_wnd, kMsgRunSearch, 0, 0);
@@ -907,7 +925,7 @@ private:
 				m_library_error = "Spotify: no playlists, albums or artists found.";
 				set_status(m_library_error);
 			} else {
-				set_status("Click an item to open it; double-click to play. Right-click for more.");
+				set_status(kLibraryHint);
 			}
 			break;
 		case library_snapshot::state_t::not_logged_in:
